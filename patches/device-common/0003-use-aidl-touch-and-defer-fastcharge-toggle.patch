@@ -1,0 +1,54 @@
+Subject: [PATCH] use AIDL touch and defer the removed FastCharge toggle
+
+--- a/device-common.mk
++++ b/device-common.mk
+@@ -134,9 +134,7 @@
+ PRODUCT_HOST_PACKAGES += \
+ 	dtbhtoolExynos
+ 
+-# FastCharge
+-PRODUCT_PACKAGES += \
+-	vendor.lineage.fastcharge@1.0-service.samsung
++# The obsolete optional FastCharge toggle is omitted during boot bring-up.
+ 
+ # Filesystem tools for resizing system partitions
+ PRODUCT_PACKAGES += \
+@@ -372,7 +370,7 @@
+ 
+ # Touch
+ PRODUCT_PACKAGES += \
+-	vendor.lineage.touch@1.0-service.samsung
++	vendor.lineage.touch-service.samsung
+ 
+ # Thermal
+ PRODUCT_PACKAGES += \
+--- a/manifest.xml
++++ b/manifest.xml
+@@ -109,22 +109,12 @@
+             <instance>default</instance>
+         </interface>
+     </hal>
+-     <hal format="hidl">
++     <hal format="aidl">
+         <name>vendor.lineage.touch</name>
+-        <transport>hwbinder</transport>
+-        <version>1.0</version>
+-        <interface>
+-            <name>IGloveMode</name>
+-            <instance>default</instance>
+-        </interface>
+-        <interface>
+-            <name>IKeyDisabler</name>
+-            <instance>default</instance>
+-        </interface>
+-        <interface>
+-            <name>IStylusMode</name>
+-            <instance>default</instance>
+-        </interface>
++        <version>1</version>
++        <fqname>IGloveMode/default</fqname>
++        <fqname>IKeyDisabler/default</fqname>
++        <fqname>IStylusMode/default</fqname>
+     </hal>
+     <hal format="hidl">
+         <name>android.hardware.gnss</name>

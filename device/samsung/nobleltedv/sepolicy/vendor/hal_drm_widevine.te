@@ -1,0 +1,4 @@
+allow hal_drm_widevine tee:unix_stream_socket connectto;
+allow hal_drm_widevine secmem_device:chr_file rw_file_perms;
+allow hal_drm_widevine cpk_efs_file:file r_file_perms;
+allow hal_drm_widevine efs_file:dir search;

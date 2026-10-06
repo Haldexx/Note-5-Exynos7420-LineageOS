@@ -1,0 +1,52 @@
+From: Haldexx
+Subject: [PATCH] arm64: allow kernel-mode NEON (may_use_simd) in softirq
+
+This kernel's kernel_neon_begin_partial() saves NEON state to per-CPU
+softirq/hardirq buffers in interrupt context, but arm64 used the generic
+may_use_simd() (!in_interrupt()). ablk_helper therefore deferred every
+cbc-aes-ce operation issued from a softirq to cryptd, so all inbound
+IPsec (ESP) decryption took the asynchronous xfrm_input_resume() path.
+On the handset, IMS SIP over IPsec lost the third TCP segment of each
+multi-segment P-CSCF message there and the socket then reported
+end-of-stream. Let softirq use NEON directly.
+
+---
+diff --git a/arch/arm64/include/asm/Kbuild b/arch/arm64/include/asm/Kbuild
+index cfe9860b..bc5da00f 100644
+--- a/arch/arm64/include/asm/Kbuild
++++ b/arch/arm64/include/asm/Kbuild
+@@ -37,7 +37,6 @@ generic-y += segment.h
+ generic-y += sembuf.h
+ generic-y += serial.h
+ generic-y += shmbuf.h
+-generic-y += simd.h
+ generic-y += sizes.h
+ generic-y += socket.h
+ generic-y += sockios.h
+diff --git a/arch/arm64/include/asm/simd.h b/arch/arm64/include/asm/simd.h
+new file mode 100644
+index 00000000..336a2d91
+--- /dev/null
++++ b/arch/arm64/include/asm/simd.h
+@@ -0,0 +1,21 @@
++#ifndef __ASM_SIMD_H
++#define __ASM_SIMD_H
++
++#include <linux/hardirq.h>
++#include <linux/irqflags.h>
++
++/*
++ * may_use_simd - whether kernel-mode NEON may be used now
++ *
++ * kernel_neon_begin_partial() saves the NEON state to a per-CPU softirq or hardirq buffer
++ * when called in interrupt context (arch/arm64/kernel/fpsimd.c), so softirq may use it.
++ * The asm-generic !in_interrupt() made ablk_helper defer every AES operation issued from a
++ * softirq to cryptd, which put all inbound IPsec (ESP) decryption on the asynchronous
++ * xfrm_input_resume() path; IMS SIP over IPsec lost TCP segments there.
++ */
++static __must_check inline bool may_use_simd(void)
++{
++	return !in_irq() && !irqs_disabled();
++}
++
++#endif /* __ASM_SIMD_H */

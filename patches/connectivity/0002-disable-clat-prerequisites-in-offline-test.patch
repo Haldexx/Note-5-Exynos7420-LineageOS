@@ -1,0 +1,63 @@
+diff --git a/service/jni/com_android_server_connectivity_ClatCoordinator.cpp b/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
+index 70991eb..4a517a7 100644
+--- a/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
++++ b/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
+@@ -34,6 +34,7 @@
+ #include <unistd.h>
+ 
+ #include <android-modules-utils/sdk_level.h>
++#include <android-base/properties.h>
+ #include <bpf/BpfMap.h>
+ #include <bpf/BpfUtils.h>
+ #include <netjniutils/netjniutils.h>
+@@ -51,6 +52,13 @@
+ 
+ namespace android {
+ 
++static bool isOfflineBootTest() {
++    const auto buildType = android::base::GetProperty("ro.build.type", "");
++    return (buildType == "userdebug" || buildType == "eng") &&
++           android::base::GetBoolProperty("ro.note5.offline_boot", false) &&
++           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++}
++
+ static bool fatal = false;
+ 
+ #define ALOGF(s ...) do { ALOGE(s); fatal = true; } while(0)
+@@ -107,6 +115,14 @@ static void verifyClatPerms() {
+     V(kClatdDir, S_IFDIR|0750, CLAT, SYSTEM, "system_file", DIR);
+     V(kClatdBin, S_IFREG|S_ISUID|S_ISGID|0755, CLAT, CLAT, "clatd_exec", BIN);
+ 
++    if (isOfflineBootTest()) {
++        // Keep the packaged binary checks. Offline mode deliberately has no
++        // CLAT programs, so their absence must not abort JNI registration.
++        if (fatal) abort();
++        ALOGW("OFFLINE NOTE 5 BOOT TEST: CLAT disabled; skipping BPF prerequisites");
++        return;
++    }
++
+     // Move on to verifying that the bpf programs and maps are as expected.
+     // This relies on the kernel and bpfloader.
+ 
+@@ -217,6 +233,10 @@ jstring com_android_server_connectivity_ClatCoordinator_generateIpv6Address(
+ static jint com_android_server_connectivity_ClatCoordinator_createTunInterface(JNIEnv* env,
+                                                                                jclass clazz,
+                                                                                jstring tuniface) {
++    if (isOfflineBootTest()) {
++        throwIOException(env, "CLAT disabled in offline Note 5 boot test", ENETDOWN);
++        return -1;
++    }
+     ScopedUtfChars v4interface(env, tuniface);
+ 
+     // open the tun device in non blocking mode as required by clatd
+@@ -360,6 +380,10 @@ static void com_android_server_connectivity_ClatCoordinator_configurePacketSocke
+ static jint com_android_server_connectivity_ClatCoordinator_startClatd(
+         JNIEnv* env, jclass clazz, jobject tunJavaFd, jobject readSockJavaFd,
+         jobject writeSockJavaFd, jstring iface, jstring pfx96, jstring v4, jstring v6) {
++    if (isOfflineBootTest()) {
++        throwIOException(env, "CLAT disabled in offline Note 5 boot test", ENETDOWN);
++        return -1;
++    }
+     ScopedUtfChars ifaceStr(env, iface);
+     ScopedUtfChars pfx96Str(env, pfx96);
+     ScopedUtfChars v4Str(env, v4);

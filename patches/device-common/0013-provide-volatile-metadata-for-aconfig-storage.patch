@@ -1,0 +1,27 @@
+--- a/BoardConfigCommon.mk
++++ b/BoardConfigCommon.mk
+@@ -137,6 +137,8 @@
+ BOARD_RECOVERYIMAGE_PARTITION_SIZE := 35651584
+ BOARD_SYSTEMIMAGE_PARTITION_SIZE := 3124019200
+ BOARD_ROOT_EXTRA_FOLDERS += efs cpefs
++# No metadata partition exists; init mounts volatile storage here for aconfig.
++BOARD_ROOT_EXTRA_FOLDERS += metadata
+ TARGET_FS_CONFIG_GEN := $(COMMON_PATH)/config.fs
+ 
+ # Platform
+--- a/ramdisk/etc/init.samsungexynos7420.rc
++++ b/ramdisk/etc/init.samsungexynos7420.rc
+@@ -9,6 +9,13 @@
+ on early-init
+     mount debugfs /sys/kernel/debug /sys/kernel/debug mode=755
+ 
++    # Android 16 reads aconfig flags from /metadata/aconfig, but this device has
++    # no metadata partition. aconfigd rebuilds that storage from the read-only
++    # partitions each boot. This file is imported by init.rc, so it runs before
++    # aconfigd.rc creates its directories.
++    mount tmpfs tmpfs /metadata nodev noexec nosuid mode=0755,uid=0,gid=0
++    restorecon /metadata
++
+     # ZRAM setup
+     write /sys/block/zram0/comp_algorithm lz4
+ 

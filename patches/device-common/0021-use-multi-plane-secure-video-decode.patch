@@ -1,0 +1,12 @@
+--- a/BoardConfigCommon.mk
++++ b/BoardConfigCommon.mk
+@@ -147,6 +147,9 @@
+ TARGET_SOC := exynos7420
+ TARGET_BOOTLOADER_BOARD_NAME := universal7420
+ include hardware/samsung_slsi-linaro/config/BoardConfig7420.mk
++# The 3.10 MFC driver has no single-fd NV12 (NV12N) output; secure decoders use NV12M like the
++# others (gralloc allocates protected MFC output as multi-fd NV12M).
++BOARD_USE_SINGLE_PLANE_IN_DRM := false
+ 
+ # Radio
+ BOARD_MODEM_TYPE := ss333

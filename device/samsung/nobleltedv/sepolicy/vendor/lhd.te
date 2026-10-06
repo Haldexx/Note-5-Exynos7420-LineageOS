@@ -1,0 +1,3 @@
+binder_use(lhd)
+wakelock_use(lhd)
+allow lhd system_file:file r_file_perms;

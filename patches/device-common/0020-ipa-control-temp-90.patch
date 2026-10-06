@@ -1,0 +1,16 @@
+--- a/configs/power/powerhint.json
++++ b/configs/power/powerhint.json
+@@ -143,11 +143,11 @@
+             "Path": "/sys/power/ipa/control_temp",
+             "Values": [
+                 "45",
+-                "63",
+                 "65",
++                "90",
+                 "120"
+             ],
+-            "DefaultIndex": 1,
++            "DefaultIndex": 2,
+             "ResetOnInit": true
+         },
+         {

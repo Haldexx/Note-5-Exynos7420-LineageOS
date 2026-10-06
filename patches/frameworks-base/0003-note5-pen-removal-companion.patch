@@ -1,0 +1,59 @@
+--- a/services/core/java/com/android/server/input/InputManagerService.java
++++ b/services/core/java/com/android/server/input/InputManagerService.java
+@@ -214,6 +214,7 @@
+     private WindowManagerCallbacks mWindowManagerCallbacks;
+     private WiredAccessoryCallbacks mWiredAccessoryCallbacks;
+     private boolean mSystemReady;
++    private boolean mNote5PenRemoved;
+ 
+     private final Object mTabletModeLock = new Object();
+     // List of currently registered tablet mode changed listeners by process id
+@@ -662,6 +663,11 @@
+                 callback.notifyLidSwitchChanged(0 /* whenNanos */, switchState == KEY_STATE_UP);
+             }
+         }
++
++        // Samsung's Note 5 switch is inverted: 1 means the pen is removed.
++        // Seed state without launching an activity when booting with the pen out.
++        mNote5PenRemoved = getSwitchState(-1, InputDevice.SOURCE_ANY, 0x0f)
++                == InputManager.SWITCH_STATE_ON;
+ 
+         // Set the HW mic toggle switch state
+         final int micMuteState = getSwitchState(-1 /* deviceId */, InputDevice.SOURCE_ANY,
+@@ -2504,6 +2510,36 @@
+         if (DEBUG) {
+             Slog.d(TAG, "notifySwitch: values=" + Integer.toHexString(switchValues)
+                     + ", mask=" + Integer.toHexString(switchMask));
++        }
++
++        if ((switchMask & (1 << 0x0f)) != 0
++                && android.os.SystemProperties.getBoolean("ro.note5.pen_companion", false)) {
++            final boolean removed = (switchValues & (1 << 0x0f)) != 0;
++            mHandler.post(() -> {
++                final boolean wasRemoved = mNote5PenRemoved;
++                mNote5PenRemoved = removed;
++                if (!mSystemReady || !removed || wasRemoved) return;
++                final android.os.PowerManager power = mContext.getSystemService(android.os.PowerManager.class);
++                final android.app.KeyguardManager keyguard = mContext.getSystemService(android.app.KeyguardManager.class);
++                if (power == null || !power.isInteractive() || keyguard == null || keyguard.isKeyguardLocked()) return;
++                final int user = android.app.ActivityManager.getCurrentUser();
++                final int action = android.provider.Settings.Secure.getIntForUser(
++                        mContext.getContentResolver(), "note5_pen_removal_action", 0, user);
++                if (action != 1 && action != 2) return;
++                final android.media.AudioManager audio = mContext.getSystemService(android.media.AudioManager.class);
++                if (audio != null && (audio.getMode() == android.media.AudioManager.MODE_IN_CALL
++                        || audio.getMode() == android.media.AudioManager.MODE_IN_COMMUNICATION)) return;
++                Intent intent = new Intent().setComponent(new android.content.ComponentName(
++                        "org.lineageos.note5pen", "org.lineageos.note5pen.MenuActivity"))
++                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP
++                                | Intent.FLAG_ACTIVITY_SINGLE_TOP)
++                        .putExtra("new_note", action == 2);
++                try {
++                    mContext.startActivityAsUser(intent, android.os.UserHandle.of(user));
++                } catch (android.content.ActivityNotFoundException | SecurityException e) {
++                    Slog.w(TAG, "S Pen companion is unavailable for the current user");
++                }
++            });
+         }
+ 
+         if ((switchMask & SW_LID_BIT) != 0) {

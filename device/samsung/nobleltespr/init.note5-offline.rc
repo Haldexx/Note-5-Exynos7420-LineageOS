@@ -1,0 +1,2 @@
+on load-bpf-programs && property:ro.note5.wfd_disabled=true
+    setprop persist.debug.wfd.enable 0

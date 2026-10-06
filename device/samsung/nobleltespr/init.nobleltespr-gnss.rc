@@ -1,0 +1,5 @@
+on property:init.svc.lhd=running
+    stop lhd
+
+on property:init.svc.gpsd=running
+    stop gpsd

@@ -1,0 +1,6 @@
+set_prop(vendor_init, vendor_power_prop)
+set_prop(vendor_init, vendor_samsung_chip_prop)
+get_prop(vendor_init, modemloader_prop)
+get_prop(vendor_init, system_prop)
+allow vendor_init media_userdir_file:dir { getattr setattr };
+allow vendor_init tmpfs:dir relabelfrom;

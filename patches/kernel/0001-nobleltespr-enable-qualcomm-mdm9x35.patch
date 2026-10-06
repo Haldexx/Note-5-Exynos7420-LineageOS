@@ -1,0 +1,101 @@
+diff --git a/arch/arm64/boot/dts/Makefile b/arch/arm64/boot/dts/Makefile
+index 6e3077e8..68dc0a37 100755
+--- a/arch/arm64/boot/dts/Makefile
++++ b/arch/arm64/boot/dts/Makefile
+@@ -66,6 +66,8 @@ dtb-$(CONFIG_BOARD_ZEROFLTE_UNI) += exynos7420-zeroflte_uni_open_06.dtb \
+ dtb-$(CONFIG_BOARD_ZEROLTE_UNI) += exynos7420-zerolte_uni_open_06.dtb \
+  exynos7420-zerolte_uni_open_07.dtb \
+  exynos7420-zerolte_uni_open_08.dtb
++dtb-$(CONFIG_BOARD_NOBLELTESPR) += exynos7420-noblelte_usa_cdma_00.dtb \
++ exynos7420-noblelte_usa_cdma_09.dtb
+ dtb-$(CONFIG_BOARD_NOBLELTE_UNI) +=  exynos7420-noblelte_uni_open_09.dtb
+ dtb-$(CONFIG_BOARD_ZENLTE_UNI) +=  exynos7420-zenlte_uni_open_09.dtb
+ 
+diff --git a/arch/arm64/mach-exynos/Kconfig b/arch/arm64/mach-exynos/Kconfig
+index 3d97a04b..dc745fa9 100644
+--- a/arch/arm64/mach-exynos/Kconfig
++++ b/arch/arm64/mach-exynos/Kconfig
+@@ -412,6 +412,11 @@ config BOARD_NOBLELTECAN
+ 	depends on SOC_EXYNOS7420 && !BOARD_7420_UNIFY
+ 	default n
+ 
++config BOARD_NOBLELTESPR
++	bool "Samsung Galaxy Note5 CDMA (N920P/N920R4, Qualcomm MDM9x35)"
++	depends on SOC_EXYNOS7420
++	default n
++
+ config BOARD_NOBLELTE_UNI 
+ 	bool "Samsung Galaxy Note5 (C/I/S/K/W8/T)"
+ 	depends on SOC_EXYNOS7420 && BOARD_7420_UNIFY
+diff --git a/drivers/usb/host/Kconfig b/drivers/usb/host/Kconfig
+index 344d5e2f..666d0d03 100644
+--- a/drivers/usb/host/Kconfig
++++ b/drivers/usb/host/Kconfig
+@@ -225,7 +225,7 @@ config USB_EHCI_SH
+ 
+ config USB_EHCI_S5P
+        tristate "EHCI support for Samsung S5P/EXYNOS SoC Series"
+-       depends on PLAT_S5P
++       depends on PLAT_S5P || SOC_EXYNOS7420
+        help
+ 	Enable support for the Samsung S5Pxxxx and Exynos3/4/5 SOC's
+ 	on-chip EHCI controller.
+diff --git a/drivers/usb/host/ehci-hub.c b/drivers/usb/host/ehci-hub.c
+index f1eb4c6e..3a253cbf 100644
+--- a/drivers/usb/host/ehci-hub.c
++++ b/drivers/usb/host/ehci-hub.c
+@@ -393,7 +393,7 @@ static int ehci_bus_resume (struct usb_hcd *hcd)
+ #ifdef CONFIG_MDM_HSIC_PM
+ 	ehci_writel(ehci, ehci->command | CMD_LRESET, &ehci->regs->command);
+ 
+-	retval = handshake(ehci, &ehci->regs->command,
++	retval = ehci_handshake(ehci, &ehci->regs->command,
+ 		   CMD_LRESET, 0, 100000 /* 100msec */);
+ 	ehci_dbg(ehci, "LRESET %d\n", retval);
+ #endif
+diff --git a/drivers/usb/misc/ipc_bridge.c b/drivers/usb/misc/ipc_bridge.c
+index 3166b382..dc48dda8 100644
+--- a/drivers/usb/misc/ipc_bridge.c
++++ b/drivers/usb/misc/ipc_bridge.c
+@@ -383,7 +383,7 @@ ipc_bridge_write(struct platform_device *pdev, char *buf, unsigned int count)
+ 		if (busy_cnt > 1 && ret == -16) {
+ 			dev_err(&dev->intf->dev, "use_count %d, pm_usage_cnt %d, rpm_status %d\n",
+ 				atomic_read(&dev->writeurb->use_count),
+-				atomic_read(&dev->intf->pm_usage_cnt),
++				atomic_read(&dev->intf->dev.power.usage_count),
+ 				dev->inturb->dev->dev.power.runtime_status);
+ 		}
+ 		goto done;
+diff --git a/drivers/usb/serial/csvt.c b/drivers/usb/serial/csvt.c
+index 56ee73ed..288a86ac 100644
+--- a/drivers/usb/serial/csvt.c
++++ b/drivers/usb/serial/csvt.c
+@@ -133,8 +133,8 @@ static int get_serial_info(struct usb_serial_port *port,
+ 		return -EFAULT;
+ 
+ 	memset(&tmp, 0, sizeof(tmp));
+-	tmp.line            = port->serial->minor;
+-	tmp.port            = port->number;
++	tmp.line            = port->minor;
++	tmp.port            = port->port_number;
+ 	tmp.baud_base       = tty_get_baud_rate(port->port.tty);
+ 	tmp.close_delay	    = port->port.close_delay / 10;
+ 	tmp.closing_wait    =
+@@ -337,7 +337,7 @@ static int csvt_ctrl_open(struct tty_struct *tty,
+ {
+ 	int	retval;
+ 
+-	dev_dbg(&port->dev, "%s port %d", __func__, port->number);
++	dev_dbg(&port->dev, "%s port %d", __func__, port->port_number);
+ 
+ 	retval = usb_submit_urb(port->interrupt_in_urb, GFP_KERNEL);
+ 	if (retval) {
+@@ -354,7 +354,7 @@ static int csvt_ctrl_open(struct tty_struct *tty,
+ 
+ static void csvt_ctrl_close(struct usb_serial_port *port)
+ {
+-	dev_dbg(&port->dev, "%s port %d", __func__, port->number);
++	dev_dbg(&port->dev, "%s port %d", __func__, port->port_number);
+ 
+ 	usb_serial_generic_close(port);
+ 	usb_kill_urb(port->interrupt_in_urb);

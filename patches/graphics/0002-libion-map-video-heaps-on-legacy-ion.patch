@@ -1,0 +1,57 @@
+--- a/base/libion/ion.cpp
++++ b/base/libion/ion.cpp
+@@ -74,6 +74,44 @@
+ 
+ #define ION_HEAP_TYPE_NONE INT_MAX
+ 
++/*
++ * Legacy Exynos ION kernels (e.g. 3.10) have no named heaps. A reserved-memory region is
++ * requested with the exynos_contig heap mask and the region's bit in the upper flags; any
++ * other mask is taken as a raw heap id, so the modern video heap ids (3, 5, 6) do not exist
++ * there. Map them: protected buffers go to the MFC input/output or scaler region (the device
++ * tree aliases these to its protectable video region), unprotected ones to the system heap.
++ * The legacy protected flag is 16 alone.
++ */
++#define LEGACY_EXYNOS_CONTIG_HEAP_MASK  (1 << 4)
++#define LEGACY_EXYNOS_GSC_MASK          (1 << 27)
++#define LEGACY_EXYNOS_MFC_OUTPUT_MASK   (1 << 26)
++#define LEGACY_EXYNOS_MFC_INPUT_MASK    (1 << 25)
++
++static void legacy_video_heap_args(unsigned int *heap_mask, unsigned int *flags) {
++    unsigned int region;
++
++    switch (*heap_mask) {
++    case EXYNOS_ION_HEAP_VIDEO_STREAM_MASK:
++        region = LEGACY_EXYNOS_MFC_INPUT_MASK;
++        break;
++    case EXYNOS_ION_HEAP_VIDEO_FRAME_MASK:
++        region = LEGACY_EXYNOS_MFC_OUTPUT_MASK;
++        break;
++    case EXYNOS_ION_HEAP_VIDEO_SCALER_MASK:
++        region = LEGACY_EXYNOS_GSC_MASK;
++        break;
++    default:
++        return;
++    }
++
++    if (*flags & ION_EXYNOS_FLAG_PROTECTED) {
++        *heap_mask = LEGACY_EXYNOS_CONTIG_HEAP_MASK;
++        *flags = (*flags & ~ION_EXYNOS_FLAG_PROTECTED) | region;
++    } else {
++        *heap_mask = EXYNOS_ION_HEAP_SYSTEM_MASK;
++    }
++}
++
+ const char *exynos_ion_get_heap_name(unsigned int legacy_heap_id) {
+     if (legacy_heap_id >= ION_NUM_HEAP_NAMES)
+         return NULL;
+@@ -107,6 +145,9 @@
+ int DmabufExporter::alloc_legacy(int ion_fd, size_t len, unsigned int heap_mask, unsigned int flags) {
+     int ret;
+     struct ion_fd_data fd_data;
++
++    legacy_video_heap_args(&heap_mask, &flags);
++
+     struct ion_allocation_data alloc_data = {
+         .len = len,
+         .align = 0,

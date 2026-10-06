@@ -1,0 +1,11 @@
+--- a/overlay/frameworks/base/core/res/res/values/config.xml
++++ b/overlay/frameworks/base/core/res/res/values/config.xml
+@@ -767,7 +767,7 @@
+         <item>"/apex/com.android.art/javalib/core-libart.jar"</item>
+         <item>"/system_ext/priv-app/SystemUI/SystemUI.apk"</item>
+         <item>"/system/bin/surfaceflinger"</item>
+-        <item>"/vendor/lib/egl/libGLES_mali.so"</item>
++        <!-- Only 64-bit processes draw with Mali; the 32-bit driver pinned 29 MB unused. -->
+         <item>"/vendor/lib64/egl/libGLES_mali.so"</item>
+     </string-array>
+ 

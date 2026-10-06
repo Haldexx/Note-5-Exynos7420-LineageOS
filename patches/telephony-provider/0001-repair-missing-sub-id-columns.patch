@@ -1,0 +1,44 @@
+diff --git a/src/com/android/providers/telephony/MmsSmsDatabaseHelper.java b/src/com/android/providers/telephony/MmsSmsDatabaseHelper.java
+index 8ba2eb3..aab4657 100644
+--- a/src/com/android/providers/telephony/MmsSmsDatabaseHelper.java
++++ b/src/com/android/providers/telephony/MmsSmsDatabaseHelper.java
+@@ -1349,6 +1349,39 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
+                    "END;");
+     }
+ 
++    /**
++     * The sub_id columns upgradeDatabaseToVersion68() adds. A database that reached version 68
++     * or later without them (for example one carried over from an older LineageOS install)
++     * never runs that step, and every thread lookup then fails on
++     * "table canonical_addresses has no column named sub_id", so no SMS can be sent or stored.
++     */
++    private static final String[] VERSION_68_SUB_ID_TABLES = {
++            MmsSmsProvider.TABLE_THREADS, MmsProvider.TABLE_PART,
++            SmsProvider.TABLE_CANONICAL_ADDRESSES, SmsProvider.TABLE_ATTACHMENTS,
++            MmsProvider.TABLE_ADDR, MmsProvider.TABLE_RATE, MmsProvider.TABLE_DRM,
++            SmsProvider.TABLE_SR_PENDING,
++    };
++
++    @Override
++    public void onOpen(SQLiteDatabase db) {
++        super.onOpen(db);
++        if (db.isReadOnly() || db.getVersion() < 68) {
++            return;
++        }
++        for (String table : VERSION_68_SUB_ID_TABLES) {
++            if (isColumnExists(db, table, "sub_id")) {
++                continue;
++            }
++            try {
++                db.execSQL("ALTER TABLE " + table + " ADD COLUMN sub_id"
++                        + " INTEGER DEFAULT " + SubscriptionManager.INVALID_SUBSCRIPTION_ID);
++                Log.w(TAG, "onOpen: added missing sub_id column to " + table);
++            } catch (SQLiteException e) {
++                Log.e(TAG, "onOpen: cannot add sub_id to " + table + "; " + e);
++            }
++        }
++    }
++
+     @Override
+     public void onUpgrade(SQLiteDatabase db, int oldVersion, int currentVersion) {
+         Log.w(TAG, "Upgrading database from version " + oldVersion

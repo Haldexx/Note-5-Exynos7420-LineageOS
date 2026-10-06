@@ -1,0 +1,105 @@
+--- a/src/com/android/services/telephony/TelephonyConnectionService.java
++++ b/src/com/android/services/telephony/TelephonyConnectionService.java
+@@ -260,6 +260,9 @@
+     private DynamicRoutingController mDynamicRoutingController;
+     private SatelliteSOSMessageRecommender mSatelliteSOSMessageRecommender;
+     private DomainSelectionResolver mDomainSelectionResolver;
++    // PhoneGlobals creates no phones or DomainSelectionResolver without FEATURE_TELEPHONY,
++    // but Telecom may still bind this service for stale or emergency phone accounts.
++    private boolean mTelephonyUnavailable;
+     private EmergencyCallDomainSelectionConnection mEmergencyCallDomainSelectionConnection;
+     private TelephonyConnection mEmergencyConnection;
+     private TelephonyConnection mAlternateEmergencyConnection;
+@@ -954,6 +957,11 @@
+     @Override
+     public void onCreate() {
+         super.onCreate();
++        if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_TELEPHONY)) {
++            mTelephonyUnavailable = true;
++            Log.w(this, "onCreate: FEATURE_TELEPHONY unavailable; failing connection requests");
++            return;
++        }
+         mImsConferenceController = new ImsConferenceController(
+                 TelecomAccountRegistry.getInstance(this),
+                 mTelephonyConnectionServiceProxy,
+@@ -978,10 +986,17 @@
+ 
+     @Override
+     public boolean onUnbind(Intent intent) {
+-        unregisterReceiver(mTtyBroadcastReceiver);
++        if (!mTelephonyUnavailable) {
++            unregisterReceiver(mTtyBroadcastReceiver);
++        }
+         return super.onUnbind(intent);
+     }
+ 
++    private static DisconnectCause telephonyUnavailableCause() {
++        return new DisconnectCause(DisconnectCause.ERROR, null, null,
++                "FEATURE_TELEPHONY unavailable");
++    }
++
+     private Conference placeOutgoingConference(ConnectionRequest request,
+             Connection resultConnection, Phone phone) {
+         if (resultConnection instanceof TelephonyConnection) {
+@@ -1053,6 +1068,10 @@
+             @Nullable PhoneAccountHandle connectionManagerPhoneAccount,
+             @NonNull final ConnectionRequest request) {
+         Log.i(this, "onCreateIncomingConference, request: " + request);
++        if (mTelephonyUnavailable) {
++            return Conference.createFailedConference(telephonyUnavailableCause(),
++                    request.getAccountHandle());
++        }
+         Connection connection = onCreateIncomingConnection(connectionManagerPhoneAccount, request);
+         Log.d(this, "onCreateIncomingConference, connection: %s", connection);
+         if (connection == null) {
+@@ -1081,6 +1100,10 @@
+             @Nullable PhoneAccountHandle connectionManagerPhoneAccount,
+             @NonNull final ConnectionRequest request) {
+         Log.i(this, "onCreateOutgoingConference, request: " + request);
++        if (mTelephonyUnavailable) {
++            return Conference.createFailedConference(telephonyUnavailableCause(),
++                    request.getAccountHandle());
++        }
+         Connection connection = onCreateOutgoingConnection(connectionManagerPhoneAccount, request);
+         Log.d(this, "onCreateOutgoingConference, connection: %s", connection);
+         if (connection == null) {
+@@ -1119,6 +1142,9 @@
+             PhoneAccountHandle connectionManagerPhoneAccount,
+             final ConnectionRequest request) {
+         Log.i(this, "onCreateOutgoingConnection, request: " + request);
++        if (mTelephonyUnavailable) {
++            return Connection.createFailedConnection(telephonyUnavailableCause());
++        }
+ 
+         Uri handle = request.getAddress();
+         boolean isAdhocConference = request.isAdhocConferenceCall();
+@@ -1764,6 +1790,9 @@
+             PhoneAccountHandle connectionManagerPhoneAccount,
+             ConnectionRequest request) {
+         Log.i(this, "onCreateIncomingConnection, request: " + request);
++        if (mTelephonyUnavailable) {
++            return Connection.createFailedConnection(telephonyUnavailableCause());
++        }
+         // If there is an incoming emergency CDMA Call (while the phone is in ECBM w/ No SIM),
+         // make sure the PhoneAccount lookup retrieves the default Emergency Phone.
+         PhoneAccountHandle accountHandle = request.getAccountHandle();
+@@ -1890,6 +1919,9 @@
+     public void onCreateIncomingConnectionFailed(PhoneAccountHandle connectionManagerPhoneAccount,
+             ConnectionRequest request) {
+         Log.i(this, "onCreateIncomingConnectionFailed, request: " + request);
++        if (mTelephonyUnavailable) {
++            return;
++        }
+         // for auto disconnect cases, the request will contain this message, so we can ignore
+         if (request.getExtras().containsKey(TelecomManager.EXTRA_CALL_DISCONNECT_MESSAGE)) {
+             Log.i(this, "onCreateIncomingConnectionFailed: auto-disconnected,"
+@@ -1980,6 +2012,9 @@
+     public Connection onCreateUnknownConnection(PhoneAccountHandle connectionManagerPhoneAccount,
+             ConnectionRequest request) {
+         Log.i(this, "onCreateUnknownConnection, request: " + request);
++        if (mTelephonyUnavailable) {
++            return Connection.createFailedConnection(telephonyUnavailableCause());
++        }
+         // Use the registered emergency Phone if the PhoneAccountHandle is set to Telephony's
+         // Emergency PhoneAccount
+         PhoneAccountHandle accountHandle = request.getAccountHandle();

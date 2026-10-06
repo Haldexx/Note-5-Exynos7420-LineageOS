@@ -1,0 +1,20 @@
+diff --git a/libprocessgroup/setup/cgroup_map_write.cpp b/libprocessgroup/setup/cgroup_map_write.cpp
+index 899b4e9..2d6d6e3 100644
+--- a/libprocessgroup/setup/cgroup_map_write.cpp
++++ b/libprocessgroup/setup/cgroup_map_write.cpp
+@@ -202,6 +202,15 @@ static bool MountV1CgroupController(const CgroupDescriptor& descriptor) {
+ 
+     if (mount("none", controller->path(), "cgroup", MS_NODEV | MS_NOEXEC | MS_NOSUID,
+               options.c_str())) {
++        // Older kernels reject the cpuset_v2_mode option with ENOENT or EINVAL.
++        // Keep their legacy cpuset semantics; do not hide other mount failures.
++        if (!strcmp(controller->name(), "cpuset") && (errno == ENOENT || errno == EINVAL)) {
++            LOG(WARNING) << "cpuset_v2_mode unavailable; retrying legacy cpuset mount";
++            if (mount("none", controller->path(), "cgroup", MS_NODEV | MS_NOEXEC | MS_NOSUID,
++                      "cpuset,noprefix") == 0) {
++                return true;
++            }
++        }
+         if (IsOptionalController(controller)) {
+             PLOG(INFO) << "Failed to mount optional controller " << controller->name();
+             return true;

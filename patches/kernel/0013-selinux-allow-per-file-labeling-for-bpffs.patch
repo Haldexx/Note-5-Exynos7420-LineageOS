@@ -1,0 +1,12 @@
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -826,7 +826,8 @@
+ 	if (!strcmp(sb->s_type->name, "debugfs") ||
+ 	    !strcmp(sb->s_type->name, "tracefs") ||
+ 	    !strcmp(sb->s_type->name, "sysfs") ||
+-	    !strcmp(sb->s_type->name, "pstore"))
++	    !strcmp(sb->s_type->name, "pstore") ||
++	    !strcmp(sb->s_type->name, "bpf"))
+ 		sbsec->flags |= SE_SBGENFS;
+ 
+ 	/* Determine the labeling behavior to use for this filesystem type. */

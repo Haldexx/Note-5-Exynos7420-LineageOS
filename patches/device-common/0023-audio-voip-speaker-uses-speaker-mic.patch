@@ -1,0 +1,15 @@
+diff --git a/hardware/audio/audio_hw.c b/hardware/audio/audio_hw.c
+--- a/hardware/audio/audio_hw.c
++++ b/hardware/audio/audio_hw.c
+@@ -368,7 +368,10 @@
+     [SND_DEVICE_IN_SPEAKER_MIC] = "speaker-mic",
+     [SND_DEVICE_IN_HEADSET_MIC] = "headset-mic",
+     [SND_DEVICE_IN_EARPIECE_MIC_AEC] = "earpiece-mic",
+-    [SND_DEVICE_IN_SPEAKER_MIC_AEC] = "voice-speaker-mic",
++    /* VoIP on the speaker: the plain mic route, with AEC done by the input preprocessors.
++     * "voice-speaker-mic" is the modem call's narrowband TX route on this codec (DSP noise
++     * suppression at 8 kHz, AP gets only the call-recording copy): muffled VoIP uplink. */
++    [SND_DEVICE_IN_SPEAKER_MIC_AEC] = "speaker-mic",
+     [SND_DEVICE_IN_HEADSET_MIC_AEC] = "headset-mic",
+     [SND_DEVICE_IN_VOICE_MIC] = "voice-mic",
+     [SND_DEVICE_IN_VOICE_EARPIECE_MIC] = "voice-earpiece-mic",

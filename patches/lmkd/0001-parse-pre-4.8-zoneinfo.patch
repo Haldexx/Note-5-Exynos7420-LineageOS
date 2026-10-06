@@ -1,0 +1,77 @@
+--- a/lmkd.cpp
++++ b/lmkd.cpp
+@@ -1728,7 +1728,8 @@
+     zone->max_protection = max;
+ }
+ 
+-static int zoneinfo_parse_zone(char **buf, struct zoneinfo_zone *zone) {
++static int zoneinfo_parse_zone(char **buf, struct zoneinfo_zone *zone,
++                               union zoneinfo_node_fields *legacy_node) {
+     for (char *line = strtok_r(NULL, "\n", buf); line;
+          line = strtok_r(NULL, "\n", buf)) {
+         char *cp;
+@@ -1764,6 +1765,21 @@
+             continue;
+         }
+ 
++        if (legacy_node) {
++            /* Pre-4.8 kernels keep the node LRU counters per zone: sum them. */
++            int node_field_idx;
++            int64_t node_val;
++            match_res = match_field(cp, ap, zoneinfo_node_field_names, ZI_NODE_FIELD_COUNT,
++                &node_val, &node_field_idx);
++            if (match_res == PARSE_FAIL) {
++                return false;
++            }
++            if (match_res == PARSE_SUCCESS) {
++                legacy_node->arr[node_field_idx] += node_val;
++                continue;
++            }
++        }
++
+         match_res = match_field(cp, ap, zoneinfo_zone_field_names, ZI_ZONE_FIELD_COUNT,
+             &val, &field_idx);
+         if (match_res == PARSE_FAIL) {
+@@ -1836,14 +1852,21 @@
+     if ((buf = reread_file(&file_data)) == NULL) {
+         return -1;
+     }
++    /*
++     * Kernels before 4.8 have no per-node stats block: every "Node" line starts a zone of
++     * that node and the node LRU counters are summed from its zones.
++     */
++    const bool legacy = strstr(buf, NODE_STATS_MARKER) == NULL;
+ 
+     for (line = strtok_r(buf, "\n", &save_ptr); line;
+          line = strtok_r(NULL, "\n", &save_ptr)) {
+         int node_id;
+         if (sscanf(line, "Node %d, zone %" STRINGIFY(LINE_MAX) "s", &node_id, zone_name) == 2) {
+             if (!node || node->id != node_id) {
+-                line = strtok_r(NULL, "\n", &save_ptr);
+-                if (strncmp(line, NODE_STATS_MARKER, strlen(NODE_STATS_MARKER)) != 0) {
++                if (!legacy) {
++                    line = strtok_r(NULL, "\n", &save_ptr);
++                }
++                if (!legacy && strncmp(line, NODE_STATS_MARKER, strlen(NODE_STATS_MARKER)) != 0) {
+                     /*
+                      * per-node stats are only present in the first non-empty zone of
+                      * the node.
+@@ -1864,7 +1887,7 @@
+                 node = &zi->nodes[node_idx];
+                 node->id = node_id;
+                 zone_idx = 0;
+-                if (!zoneinfo_parse_node(&save_ptr, node)) {
++                if (!legacy && !zoneinfo_parse_node(&save_ptr, node)) {
+                     ALOGE("%s parse error", file_data.filename);
+                     return -1;
+                 }
+@@ -1872,7 +1895,8 @@
+                 /* new zone is found */
+                 zone_idx++;
+             }
+-            if (!zoneinfo_parse_zone(&save_ptr, &node->zones[zone_idx])) {
++            if (!zoneinfo_parse_zone(&save_ptr, &node->zones[zone_idx],
++                                     legacy ? &node->fields : NULL)) {
+                 ALOGE("%s parse error", file_data.filename);
+                 return -1;
+             }

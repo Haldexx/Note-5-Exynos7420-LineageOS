@@ -1,0 +1,143 @@
+diff --git a/server/BandwidthController.cpp b/server/BandwidthController.cpp
+index 8a96738..98e6c50 100644
+--- a/server/BandwidthController.cpp
++++ b/server/BandwidthController.cpp
+@@ -43,6 +43,7 @@
+ 
+ #include "android-base/stringprintf.h"
+ #include "android-base/strings.h"
++#include "android-base/properties.h"
+ #define LOG_TAG "BandwidthController"
+ #include <cutils/properties.h>
+ #include <log/log.h>
+@@ -200,7 +201,23 @@ static const uint32_t uidBillingMask = Fwmark::getUidBillingMask();
+  * See go/ipsec-data-accounting for more information.
+  */
+ 
++// Offline boot mode for kernels without BPF program support. Not for release builds.
++static bool isOfflineBootTest() {
++    const auto buildType = android::base::GetProperty("ro.build.type", "");
++    return (buildType == "userdebug" || buildType == "eng") &&
++           android::base::GetBoolProperty("ro.note5.offline_boot", false) &&
++           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++}
++
+ std::vector<std::string> getBasicAccountingCommands() {
++    if (isOfflineBootTest()) {
++        // No pinned BPF programs exist in offline boot mode. Keep loopback working,
++        // and block IPv4/IPv6 traffic before any other controller's accept rules.
++        // The caller applies this to both families and treats installation failure
++        // as fatal, just as it does for the normal accounting rules.
++        return {"*filter", "-I INPUT 1 ! -i lo -j DROP",
++                "-I OUTPUT 1 ! -o lo -j DROP", "-I FORWARD 1 -j DROP", "COMMIT\n"};
++    }
+     // clang-format off
+     std::vector<std::string> ipt_basic_accounting_commands = {
+             "*filter",
+diff --git a/server/NetdNativeService.cpp b/server/NetdNativeService.cpp
+index 957261a..49740da 100644
+--- a/server/NetdNativeService.cpp
++++ b/server/NetdNativeService.cpp
+@@ -24,6 +24,7 @@
+ #include <vector>
+ 
+ #include <android-base/file.h>
++#include <android-base/properties.h>
+ #include <android-base/stringprintf.h>
+ #include <android-base/strings.h>
+ #include <binder/IPCThreadState.h>
+@@ -65,6 +66,14 @@ namespace android {
+ namespace net {
+ 
+ namespace {
++// Offline boot mode for kernels without BPF program support. Not for release builds.
++static bool isOfflineBootTest() {
++    const auto buildType = android::base::GetProperty("ro.build.type", "");
++    return (buildType == "userdebug" || buildType == "eng") &&
++           android::base::GetBoolProperty("ro.note5.offline_boot", false) &&
++           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++}
++
+ const char OPT_SHORT[] = "--short";
+ 
+ #define ENFORCE_ANY_PERMISSION(...)                                \
+@@ -272,6 +281,7 @@ binder::Status NetdNativeService::bandwidthRemoveNiceApp(int32_t) {
+ // tests.
+ binder::Status NetdNativeService::networkCreatePhysical(int32_t netId, int32_t permission) {
+     ENFORCE_NETWORK_STACK_PERMISSIONS();
++    if (isOfflineBootTest()) return statusFromErrcode(-ENETDOWN);
+     int ret = gCtls->netCtrl.createPhysicalNetwork(netId, convertPermission(permission),
+                                                    false /* local */);
+     return statusFromErrcode(ret);
+@@ -281,6 +291,7 @@ binder::Status NetdNativeService::networkCreatePhysical(int32_t netId, int32_t p
+ // tests.
+ binder::Status NetdNativeService::networkCreateVpn(int32_t netId, bool secure) {
+     ENFORCE_NETWORK_STACK_PERMISSIONS();
++    if (isOfflineBootTest()) return statusFromErrcode(-ENETDOWN);
+     // The value of vpnType does not matter here, because it is not used in AOSP and is only
+     // implemented by OEMs. Also, the RPC is going to deprecate. Just pick a value defined in INetd
+     // as default.
+@@ -291,6 +302,7 @@ binder::Status NetdNativeService::networkCreateVpn(int32_t netId, bool secure) {
+ 
+ binder::Status NetdNativeService::networkCreate(const NativeNetworkConfig& config) {
+     ENFORCE_NETWORK_STACK_PERMISSIONS();
++    if (isOfflineBootTest()) return statusFromErrcode(-ENETDOWN);
+     int ret = -EINVAL;
+     if (config.networkType == NativeNetworkType::PHYSICAL) {
+         ret = gCtls->netCtrl.createPhysicalNetwork(
+@@ -314,6 +326,7 @@ binder::Status NetdNativeService::networkDestroy(int32_t netId) {
+ 
+ binder::Status NetdNativeService::networkAddInterface(int32_t netId, const std::string& iface) {
+     ENFORCE_NETWORK_STACK_PERMISSIONS();
++    if (isOfflineBootTest()) return statusFromErrcode(-ENETDOWN);
+     int ret = gCtls->netCtrl.addInterfaceToNetwork(netId, iface.c_str());
+     return statusFromErrcode(ret);
+ }
+@@ -761,6 +774,7 @@ binder::Status NetdNativeService::ipfwdGetRequesterList(std::vector<std::string>
+ 
+ binder::Status NetdNativeService::ipfwdEnableForwarding(const std::string& requester) {
+     NETD_LOCKING_RPC(gCtls->tetherCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
++    if (isOfflineBootTest()) return statusFromErrcode(-ENETDOWN);
+     int res = (gCtls->tetherCtrl.enableForwarding(requester.c_str())) ? 0 : -EREMOTEIO;
+     return statusFromErrcode(res);
+ }
+@@ -774,6 +788,7 @@ binder::Status NetdNativeService::ipfwdDisableForwarding(const std::string& requ
+ binder::Status NetdNativeService::ipfwdAddInterfaceForward(const std::string& fromIface,
+                                                            const std::string& toIface) {
+     ENFORCE_NETWORK_STACK_PERMISSIONS();
++    if (isOfflineBootTest()) return statusFromErrcode(-ENETDOWN);
+     int res = RouteController::enableTethering(fromIface.c_str(), toIface.c_str());
+     return statusFromErrcode(res);
+ }
+@@ -832,6 +847,7 @@ binder::Status NetdNativeService::interfaceSetCfg(const InterfaceConfigurationPa
+                          .prettyFunction(__PRETTY_FUNCTION__)
+                          .arg(interfaceConfigurationParcelToString(cfg));
+ 
++    if (isOfflineBootTest() && cfg.ifName != "lo") return statusFromErrcode(-ENETDOWN);
+     const auto& res = InterfaceController::setCfg(cfg);
+     RETURN_BINDER_STATUS_IF_NOT_OK(entry, res);
+ 
+@@ -854,6 +870,7 @@ binder::Status NetdNativeService::interfaceClearAddrs(const std::string& ifName)
+ 
+ binder::Status NetdNativeService::interfaceSetEnableIPv6(const std::string& ifName, bool enable) {
+     NETD_LOCKING_RPC(InterfaceController::mutex, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
++    if (isOfflineBootTest() && enable && ifName != "lo") return statusFromErrcode(-ENETDOWN);
+     int res = InterfaceController::setEnableIPv6(ifName.c_str(), enable);
+     return statusFromErrcode(res);
+ }
+@@ -874,6 +891,7 @@ binder::Status NetdNativeService::tetherStart(const std::vector<std::string>& dh
+ 
+ binder::Status NetdNativeService::tetherStartWithConfiguration(const TetherConfigParcel& config) {
+     NETD_LOCKING_RPC(gCtls->tetherCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
++    if (isOfflineBootTest()) return statusFromErrcode(-ENETDOWN);
+     if (config.dhcpRanges.size() % 2 == 1) {
+         return statusFromErrcode(-EINVAL);
+     }
+@@ -896,6 +914,7 @@ binder::Status NetdNativeService::tetherIsEnabled(bool* enabled) {
+ 
+ binder::Status NetdNativeService::tetherInterfaceAdd(const std::string& ifName) {
+     NETD_LOCKING_RPC(gCtls->tetherCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
++    if (isOfflineBootTest()) return statusFromErrcode(-ENETDOWN);
+     int res = gCtls->tetherCtrl.tetherInterface(ifName.c_str());
+     return statusFromErrcode(res);
+ }

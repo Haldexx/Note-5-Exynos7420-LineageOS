@@ -1,0 +1,28 @@
+--- a/sysmeminfo.cpp
++++ b/sysmeminfo.cpp
+@@ -384,6 +384,12 @@
+ #if defined(__ANDROID__) && !defined(__ANDROID_APEX__) && !defined(__ANDROID_VNDK__)
+     static constexpr const char kBpfGpuMemTotalMap[] = "/sys/fs/bpf/map_gpuMem_gpu_mem_total_map";
+ 
++    // The map exists only where the kernel has the gpu_mem tracepoint (not kernel 3.10), and
++    // BpfMapRO's pathname constructor aborts on a missing map before isValid() can be checked.
++    if (access(kBpfGpuMemTotalMap, R_OK) != 0) {
++        return false;
++    }
++
+     // Use the read-only wrapper BpfMapRO to properly retrieve the read-only map.
+     auto map = bpf::BpfMapRO<uint64_t, uint64_t>(kBpfGpuMemTotalMap);
+     if (!map.isValid()) {
+@@ -438,6 +444,12 @@
+     // BPF Key [32-bits GPU ID | 32-bits PID]
+     uint64_t kBpfKeyGpuUsage = ((uint64_t)gpu_id << 32) | pid;
+ 
++    // The map exists only where the kernel has the gpu_mem tracepoint (not kernel 3.10), and
++    // BpfMapRO's pathname constructor aborts on a missing map before isValid() can be checked.
++    if (access(kBpfGpuMemTotalMap, R_OK) != 0) {
++        return false;
++    }
++
+     // Use the read-only wrapper BpfMapRO to properly retrieve the read-only map.
+     auto map = bpf::BpfMapRO<uint64_t, uint64_t>(kBpfGpuMemTotalMap);
+     if (!map.isValid()) {

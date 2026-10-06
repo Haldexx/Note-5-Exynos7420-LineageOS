@@ -1,0 +1,2 @@
+set_prop(bpfloader, note5_bpf_prop)
+allow bpfloader { fs_bpf_net_shared fs_bpf_netd_readonly }:file write;

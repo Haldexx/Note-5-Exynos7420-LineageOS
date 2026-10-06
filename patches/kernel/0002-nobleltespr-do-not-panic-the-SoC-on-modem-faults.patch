@@ -1,0 +1,47 @@
+diff --git a/arch/arm64/mach-exynos/subsystem_restart.c b/arch/arm64/mach-exynos/subsystem_restart.c
+index 8457ecb3..0b5f0602 100644
+--- a/arch/arm64/mach-exynos/subsystem_restart.c
++++ b/arch/arm64/mach-exynos/subsystem_restart.c
+@@ -671,7 +671,7 @@ static void __subsystem_restart_dev(struct subsys_device *dev)
+ 			wake_lock(&dev->wake_lock);
+ 			queue_work(ssr_wq, &dev->work);
+ 		} else {
+-			panic("CP Crash - Subsystem %s crashed during SSR!", name);
++			pr_err("CP Crash - %s crashed during SSR\n", name);
+ 		}
+ 	}
+ 	spin_unlock_irqrestore(&track->s_lock, flags);
+@@ -729,10 +729,16 @@ int subsystem_restart_dev(struct subsys_device *dev)
+ 		__subsystem_restart_dev(dev);
+ 		break;
+ 	case RESET_SOC:
+-		panic("CP Crash - please soft reset and collect cp dump - %s crashed.", name);
++		/* nobleltespr: restart only the modem subsystem. Panicking the
++		 * whole SoC on every CP crash makes recovery impossible and is
++		 * not useful on a production build. */
++		pr_err("CP Crash - %s crashed, restarting subsystem\n", name);
++		__subsystem_restart_dev(dev);
+ 		break;
+ 	default:
+-		panic("CP Crash - subsys-restart: Unknown restart level!\n");
++		pr_err("subsys-restart: unknown restart level, restarting %s\n",
++		       name);
++		__subsystem_restart_dev(dev);
+ 		break;
+ 	}
+ 	module_put(dev->owner);
+diff --git a/drivers/esoc/esoc-mdm-drv.c b/drivers/esoc/esoc-mdm-drv.c
+index a6b23fae..615e5b09 100644
+--- a/drivers/esoc/esoc-mdm-drv.c
++++ b/drivers/esoc/esoc-mdm-drv.c
+@@ -174,7 +174,9 @@ static int mdm_subsys_powerup(const struct subsys_desc *crashed_subsys)
+ 	if (!wait_for_completion_timeout(&mdm_drv->boot_done,
+ 		msecs_to_jiffies(60000))) {
+ 		dev_err(&esoc_clink->dev, "Unable to boot\n");
+-		panic("CP BOOT UP FAIL - NEED CP DUMP");
++		/* nobleltespr: a modem boot timeout must not take down the AP.
++		 * Report it and let the caller/SSR retry instead. */
++		return -ETIMEDOUT;
+ 	}
+ 
+ 	if (mdm_drv->boot_fail) {

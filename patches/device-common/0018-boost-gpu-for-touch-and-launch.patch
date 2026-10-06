@@ -1,0 +1,37 @@
+--- a/configs/power/powerhint.json
++++ b/configs/power/powerhint.json
+@@ -121,6 +121,8 @@
+             "Name": "GPUMinFreq",
+             "Path": "/sys/kernel/gpu/gpu_min_clock",
+             "Values": [
++                "600",
++                "544",
+                 "420",
+                 "350",
+                 "266"
+@@ -218,6 +220,12 @@
+             "Value": "1"
+         },
+         {
++            "PowerHint": "INTERACTION",
++            "Node": "GPUMinFreq",
++            "Duration": 0,
++            "Value": "600"
++        },
++        {
+             "PowerHint": "LAUNCH",
+             "Node": "CPUBigClusterBoost",
+             "Duration": 5000,
+@@ -225,6 +233,12 @@
+         },
+         {
+             "PowerHint": "LAUNCH",
++            "Node": "GPUMinFreq",
++            "Duration": 5000,
++            "Value": "600"
++        },
++        {
++            "PowerHint": "LAUNCH",
+             "Node": "CPULittleClusterBoost",
+             "Duration": 5000,
+             "Value": "1"

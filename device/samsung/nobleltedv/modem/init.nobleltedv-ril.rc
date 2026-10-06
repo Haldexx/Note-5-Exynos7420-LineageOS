@@ -1,0 +1,7 @@
+service ril-daemon /vendor/bin/hw/rild -l ${vendor.sec.rild.libpath}
+    class main
+    user radio
+    group radio cache inet misc audio sdcard_r sdcard_rw log vpn system readproc wakelock
+    capabilities BLOCK_SUSPEND NET_ADMIN NET_RAW SYS_ADMIN CHOWN SYS_TIME
+    socket sap_uim_socket1 stream 660 bluetooth bluetooth
+    onrestart restart cpboot-daemon

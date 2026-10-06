@@ -1,0 +1,191 @@
+--- /dev/null
++++ b/libshims/libsensor_gps/Android.bp
+@@ -0,0 +1,11 @@
++// The prebuilt Broadcom gpsd (BCM4773) links libsensor.so, which vendor processes can no
++// longer load from system. This vendor libsensor exports exactly the functions gpsd
++// imports and reports no sensors, so gpsd runs on GNSS alone.
++cc_library_shared {
++    name: "libsensor_gps_shim",
++    stem: "libsensor",
++    vendor: true,
++    compile_multilib: "64",
++    srcs: ["libsensor.cpp"],
++    shared_libs: ["libutils"],
++}
+--- /dev/null
++++ b/libshims/libsensor_gps/libsensor.cpp
+@@ -0,0 +1,115 @@
++/*
++ * The 17 libsensor functions imported by the prebuilt gpsd, backed by no sensors: the
++ * sensor list is empty and no default sensor exists, so gpsd never enables sensor-assisted
++ * positioning. Class layouts match frameworks/native libsensor where gpsd depends on them
++ * (SensorEventQueue is a RefBase at offset 0, held through sp<>).
++ */
++
++#include <sys/eventfd.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++#include <utils/Errors.h>
++#include <utils/RefBase.h>
++#include <utils/String16.h>
++#include <utils/String8.h>
++#include <utils/StrongPointer.h>
++#include <utils/Timers.h>
++
++struct ASensorEvent;
++
++namespace android {
++
++class Sensor {
++  public:
++    const String8& getName() const;
++    const String8& getVendor() const;
++    int32_t getHandle() const;
++    int32_t getType() const;
++    float getMaxValue() const;
++    float getResolution() const;
++    float getPowerUsage() const;
++    int32_t getMinDelay() const;
++};
++
++class SensorEventQueue : public RefBase {
++  public:
++    SensorEventQueue() : mFd(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {}
++
++    ssize_t read(ASensorEvent* events, size_t numEvents);
++    int getFd() const;
++    status_t enableSensor(Sensor const* sensor) const;
++    status_t disableSensor(Sensor const* sensor) const;
++    status_t setEventRate(Sensor const* sensor, nsecs_t ns) const;
++
++  protected:
++    ~SensorEventQueue() override {
++        if (mFd >= 0) close(mFd);
++    }
++
++  private:
++    const int mFd;  // never signalled: no sensor ever reports
++};
++
++class SensorManager {
++  public:
++    static SensorManager& getInstanceForPackage(const String16& packageName);
++    ssize_t getSensorList(Sensor const* const** list);
++    Sensor const* getDefaultSensor(int type);
++    sp<SensorEventQueue> createEventQueue(String8 packageName, int mode);
++};
++
++static const String8& emptyString() {
++    static const String8 empty;
++    return empty;
++}
++
++const String8& Sensor::getName() const { return emptyString(); }
++const String8& Sensor::getVendor() const { return emptyString(); }
++int32_t Sensor::getHandle() const { return -1; }
++int32_t Sensor::getType() const { return 0; }
++float Sensor::getMaxValue() const { return 0; }
++float Sensor::getResolution() const { return 0; }
++float Sensor::getPowerUsage() const { return 0; }
++int32_t Sensor::getMinDelay() const { return 0; }
++
++ssize_t SensorEventQueue::read(ASensorEvent* /*events*/, size_t /*numEvents*/) {
++    return 0;
++}
++
++int SensorEventQueue::getFd() const {
++    return mFd;
++}
++
++status_t SensorEventQueue::enableSensor(Sensor const* /*sensor*/) const {
++    return BAD_VALUE;
++}
++
++status_t SensorEventQueue::disableSensor(Sensor const* /*sensor*/) const {
++    return BAD_VALUE;
++}
++
++status_t SensorEventQueue::setEventRate(Sensor const* /*sensor*/, nsecs_t /*ns*/) const {
++    return BAD_VALUE;
++}
++
++SensorManager& SensorManager::getInstanceForPackage(const String16& /*packageName*/) {
++    static SensorManager instance;
++    return instance;
++}
++
++ssize_t SensorManager::getSensorList(Sensor const* const** list) {
++    static Sensor const* const kNoSensors[1] = {nullptr};
++    *list = kNoSensors;
++    return 0;
++}
++
++Sensor const* SensorManager::getDefaultSensor(int /*type*/) {
++    return nullptr;
++}
++
++sp<SensorEventQueue> SensorManager::createEventQueue(String8 /*packageName*/, int /*mode*/) {
++    return sp<SensorEventQueue>::make();
++}
++
++}  // namespace android
+--- /dev/null
++++ b/libshims/vendor_name_stubs/Android.bp
+@@ -0,0 +1,21 @@
++// Prebuilt vendor blobs that still name libraries vendor processes can no longer load from
++// system, while importing no symbols from them (libc provides everything they use).
++// gpsd and lhd name libicuuc.so; the LifeVibes voice effects in audio_effects.xml and the
++// stock Widevine L1 liboemcrypto.so name libstdc++.so.
++cc_library_shared {
++    name: "libicuuc_gps_stub",
++    stem: "libicuuc",
++    vendor: true,
++    compile_multilib: "64",
++    srcs: ["empty.c"],
++    stl: "none",
++}
++
++cc_library_shared {
++    name: "libstdc++_vendor_compat",
++    stem: "libstdc++",
++    vendor: true,
++    compile_multilib: "32",
++    srcs: ["empty.c"],
++    stl: "none",
++}
+--- /dev/null
++++ b/libshims/vendor_name_stubs/empty.c
+@@ -0,0 +1 @@
++// Intentionally empty: provides only the library name.
+--- a/device-common.mk
++++ b/device-common.mk
+@@ -136,6 +136,14 @@
+ 	android.hardware.drm@1.0-service \
+ 	android.hardware.drm-service.clearkey
+ 
++# The prebuilt Widevine drm@1.1 service and libwvhidl (32-bit), and libsec-ril (64-bit,
++# linked by gpsd through libwrappergps), still link the pre-R HIDL split libraries (now
++# empty wrappers around libhidlbase).
++PRODUCT_PACKAGES += \
++	android.hardware.drm@1.1.vendor:32 \
++	libhidltransport.vendor \
++	libhwbinder.vendor
++
+ # DTB
+ PRODUCT_HOST_PACKAGES += \
+ 	dtbhtoolExynos
+@@ -357,6 +365,13 @@
+ PRODUCT_PACKAGES += \
+ 	sensor_shim
+ 
++# Library names still linked by vendor blobs: gpsd/lhd (libicuuc, libsensor), LifeVibes
++# voice effects and the stock Widevine OEMCrypto (libstdc++).
++PRODUCT_PACKAGES += \
++	libicuuc_gps_stub \
++	libsensor_gps_shim \
++	libstdc++_vendor_compat
++
+ # Soong namespaces
+ PRODUCT_SOONG_NAMESPACES += \
+ 	$(COMMON_PATH) \

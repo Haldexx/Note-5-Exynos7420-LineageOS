@@ -1,0 +1,42 @@
+From: Haldexx
+Subject: [PATCH] tcp: record received TCP flags in TCP_SKB_CB
+
+Samsung's MPTCP backport makes tcp_data_queue() decide whether an
+in-order segment carries a FIN from TCP_SKB_CB(skb)->tcp_flags, but
+tcp_v4_rcv() and tcp_v6_rcv() never set that field for received
+segments (upstream only started doing so in 3.18, commit e11ecddf5128,
+"tcp: use TCP_SKB_CB(skb)->tcp_flags in input path"). The byte is left
+over from the layer that used skb->cb before TCP. For IPsec input that
+is esp6's ESP_SKB_CB(skb)->tmp pointer, whose byte at the tcp_flags
+offset is 0xff, so every ESP segment that took the slow path was taken
+for a FIN: the socket entered CLOSE_WAIT with no FIN on the wire and the
+reader got end-of-stream. On the handset this ended IMS SIP connections
+after one message (registration, 100 Trying, a PRACK's 200 OK), so
+VoLTE calls dropped during setup. Plain TCP starts from a zeroed cb and
+was unaffected. Record the header's flag byte as upstream does.
+
+---
+diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
+index fd5e4987..d89d1ab3 100644
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -2270,6 +2270,7 @@ int tcp_v4_rcv(struct sk_buff *skb)
+ 	TCP_SKB_CB(skb)->end_seq = (TCP_SKB_CB(skb)->seq + th->syn + th->fin +
+ 				    skb->len - th->doff * 4);
+ 	TCP_SKB_CB(skb)->ack_seq = ntohl(th->ack_seq);
++	TCP_SKB_CB(skb)->tcp_flags = tcp_flag_byte(th);
+ #ifdef CONFIG_MPTCP
+ 	TCP_SKB_CB(skb)->mptcp_flags = 0;
+ 	TCP_SKB_CB(skb)->dss_off = 0;
+diff --git a/net/ipv6/tcp_ipv6.c b/net/ipv6/tcp_ipv6.c
+index 13f3a32e..376b7f57 100644
+--- a/net/ipv6/tcp_ipv6.c
++++ b/net/ipv6/tcp_ipv6.c
+@@ -1813,6 +1813,7 @@ static int tcp_v6_rcv(struct sk_buff *skb)
+ 	TCP_SKB_CB(skb)->end_seq = (TCP_SKB_CB(skb)->seq + th->syn + th->fin +
+ 				    skb->len - th->doff*4);
+ 	TCP_SKB_CB(skb)->ack_seq = ntohl(th->ack_seq);
++	TCP_SKB_CB(skb)->tcp_flags = tcp_flag_byte(th);
+ #ifdef CONFIG_MPTCP
+ 	TCP_SKB_CB(skb)->mptcp_flags = 0;
+ 	TCP_SKB_CB(skb)->dss_off = 0;

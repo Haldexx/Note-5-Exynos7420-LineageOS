@@ -1,0 +1,19 @@
+From: Haldexx
+Subject: [PATCH] noblelte: remove KernelSU
+
+KernelSU grants root to a manager app and modifies the loaded SELinux
+policy at runtime. The production kernel does not include it.
+
+---
+diff --git a/arch/arm64/configs/exynos7420-noblelte_defconfig b/arch/arm64/configs/exynos7420-noblelte_defconfig
+--- a/arch/arm64/configs/exynos7420-noblelte_defconfig
++++ b/arch/arm64/configs/exynos7420-noblelte_defconfig
+@@ -4165,7 +4165,7 @@
+ #
+ # KernelSU
+ #
+-CONFIG_KSU=y
++# CONFIG_KSU is not set
+ # CONFIG_KSU_DEBUG is not set
+ # CONFIG_KSU_THRONE_TRACKER_ALWAYS_THREADED is not set
+ # CONFIG_KSU_ALLOWLIST_WORKAROUND is not set

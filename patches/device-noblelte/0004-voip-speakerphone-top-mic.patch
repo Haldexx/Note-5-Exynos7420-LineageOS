@@ -1,0 +1,23 @@
+diff --git a/configs/audio/mixer_paths.xml b/configs/audio/mixer_paths.xml
+--- a/configs/audio/mixer_paths.xml
++++ b/configs/audio/mixer_paths.xml
+@@ -1012,6 +1012,19 @@
+ 		<path name="gain-media-mic"/>
+ 	</path>
+ 
++	<!-- VoIP speakerphone (VOICE_COMMUNICATION with AEC on the speaker, HAL
++	     SND_DEVICE_IN_SPEAKER_MIC_AEC): the top (sub) mic at 0 dB, far from the bottom
++	     loudspeaker. speaker-mic (bottom main mic, +15 dB) let the far end hear its own
++	     echo; the modem call's speaker route also takes the top mic as its primary input. -->
++	<path name="voip-speaker-mic">
++		<ctl name="Sub Mic Switch" value="1" />
++		<ctl name="LHPF2 Input 1" value="IN3L" />
++		<ctl name="IN3L Digital Volume" value="128" />
++		<ctl name="LHPF2 Input 1 Volume" value="32" />
++		<ctl name="AIF1TX1 Input 1" value="LHPF2" />
++		<ctl name="AIF1TX2 Input 1" value="LHPF2" />
++	</path>
++
+ 	<path name="headset-mic">
+ 		<!-- Call recording route -->
+                 <ctl name="AIF1TX1 Input 1" value="LHPF1" />

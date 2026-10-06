@@ -1,0 +1,38 @@
+diff --git a/libshims/vendor_name_stubs/Android.bp b/libshims/vendor_name_stubs/Android.bp
+--- a/libshims/vendor_name_stubs/Android.bp
++++ b/libshims/vendor_name_stubs/Android.bp
+@@ -1,7 +1,9 @@
+ // Prebuilt vendor blobs that still name libraries vendor processes can no longer load from
+ // system, while importing no symbols from them (libc provides everything they use).
+-// gpsd and lhd name libicuuc.so; the LifeVibes voice effects in audio_effects.xml and the
+-// stock Widevine L1 liboemcrypto.so name libstdc++.so.
++// gpsd and lhd name libicuuc.so; the LifeVibes voice effects in audio_effects.xml, the
++// stock Widevine L1 liboemcrypto.so (32-bit) and the fingerprint blobs behind
++// libbauthserver.so (64-bit: libbauthtzcommon, libegis_fp_normal_sensor_test,
++// libgf_in_system_lib) name libstdc++.so.
+ cc_library_shared {
+     name: "libicuuc_gps_stub",
+     stem: "libicuuc",
+@@ -15,7 +17,7 @@
+     name: "libstdc++_vendor_compat",
+     stem: "libstdc++",
+     vendor: true,
+-    compile_multilib: "32",
++    compile_multilib: "both",
+     srcs: ["empty.c"],
+     stl: "none",
+ }
+diff --git a/ramdisk/etc/init.samsung.rc b/ramdisk/etc/init.samsung.rc
+--- a/ramdisk/etc/init.samsung.rc
++++ b/ramdisk/etc/init.samsung.rc
+@@ -102,6 +102,10 @@
+     
+     # FINGERPRINT - Legacy path
+     mkdir /data/biometrics 0770 system system
++    # The fingerprint HAL passes /data/vendor/biometrics/fp/User_<id>/ to set_active_group;
++    # libbauthserver keeps the templates under /data/biometrics/fp itself.
++    mkdir /data/vendor/biometrics 0770 system system
++    mkdir /data/vendor/biometrics/fp 0770 system system
+     restorecon_recursive /data/biometrics
+ 
+     # NFC: create data/vendor/nfc for nv storage

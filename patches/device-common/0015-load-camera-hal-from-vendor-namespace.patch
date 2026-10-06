@@ -1,0 +1,1426 @@
+--- /dev/null
++++ b/camera/client/CameraParameters.cpp
+@@ -0,0 +1,540 @@
++// Vendor copy of frameworks/av/camera/CameraParameters.cpp at b6b36c1fdb3c6ffced822a054fbf035b544f0de2.
++// Built into the vendor libcamera_client needed by the Exynos 7420 camera blobs.
++/*
++**
++** Copyright 2008, The Android Open Source Project
++**
++** Licensed under the Apache License, Version 2.0 (the "License");
++** you may not use this file except in compliance with the License.
++** You may obtain a copy of the License at
++**
++**     http://www.apache.org/licenses/LICENSE-2.0
++**
++** Unless required by applicable law or agreed to in writing, software
++** distributed under the License is distributed on an "AS IS" BASIS,
++** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++** See the License for the specific language governing permissions and
++** limitations under the License.
++*/
++
++#define LOG_TAG "CameraParams"
++#include <utils/Log.h>
++
++#include <string.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <camera/CameraParameters.h>
++#include <system/graphics.h>
++
++namespace android {
++// Parameter keys to communicate between camera application and driver.
++const char CameraParameters::KEY_PREVIEW_SIZE[] = "preview-size";
++const char CameraParameters::KEY_SUPPORTED_PREVIEW_SIZES[] = "preview-size-values";
++const char CameraParameters::KEY_PREVIEW_FORMAT[] = "preview-format";
++const char CameraParameters::KEY_SUPPORTED_PREVIEW_FORMATS[] = "preview-format-values";
++const char CameraParameters::KEY_PREVIEW_FRAME_RATE[] = "preview-frame-rate";
++const char CameraParameters::KEY_SUPPORTED_PREVIEW_FRAME_RATES[] = "preview-frame-rate-values";
++const char CameraParameters::KEY_PREVIEW_FPS_RANGE[] = "preview-fps-range";
++const char CameraParameters::KEY_SUPPORTED_PREVIEW_FPS_RANGE[] = "preview-fps-range-values";
++const char CameraParameters::KEY_PICTURE_SIZE[] = "picture-size";
++const char CameraParameters::KEY_SUPPORTED_PICTURE_SIZES[] = "picture-size-values";
++const char CameraParameters::KEY_PICTURE_FORMAT[] = "picture-format";
++const char CameraParameters::KEY_SUPPORTED_PICTURE_FORMATS[] = "picture-format-values";
++const char CameraParameters::KEY_JPEG_THUMBNAIL_WIDTH[] = "jpeg-thumbnail-width";
++const char CameraParameters::KEY_JPEG_THUMBNAIL_HEIGHT[] = "jpeg-thumbnail-height";
++const char CameraParameters::KEY_SUPPORTED_JPEG_THUMBNAIL_SIZES[] = "jpeg-thumbnail-size-values";
++const char CameraParameters::KEY_JPEG_THUMBNAIL_QUALITY[] = "jpeg-thumbnail-quality";
++const char CameraParameters::KEY_JPEG_QUALITY[] = "jpeg-quality";
++const char CameraParameters::KEY_ROTATION[] = "rotation";
++const char CameraParameters::KEY_GPS_LATITUDE[] = "gps-latitude";
++const char CameraParameters::KEY_GPS_LONGITUDE[] = "gps-longitude";
++const char CameraParameters::KEY_GPS_ALTITUDE[] = "gps-altitude";
++const char CameraParameters::KEY_GPS_TIMESTAMP[] = "gps-timestamp";
++const char CameraParameters::KEY_GPS_PROCESSING_METHOD[] = "gps-processing-method";
++const char CameraParameters::KEY_WHITE_BALANCE[] = "whitebalance";
++const char CameraParameters::KEY_SUPPORTED_WHITE_BALANCE[] = "whitebalance-values";
++const char CameraParameters::KEY_EFFECT[] = "effect";
++const char CameraParameters::KEY_SUPPORTED_EFFECTS[] = "effect-values";
++const char CameraParameters::KEY_ANTIBANDING[] = "antibanding";
++const char CameraParameters::KEY_SUPPORTED_ANTIBANDING[] = "antibanding-values";
++const char CameraParameters::KEY_SCENE_MODE[] = "scene-mode";
++const char CameraParameters::KEY_SUPPORTED_SCENE_MODES[] = "scene-mode-values";
++const char CameraParameters::KEY_FLASH_MODE[] = "flash-mode";
++const char CameraParameters::KEY_SUPPORTED_FLASH_MODES[] = "flash-mode-values";
++const char CameraParameters::KEY_FOCUS_MODE[] = "focus-mode";
++const char CameraParameters::KEY_SUPPORTED_FOCUS_MODES[] = "focus-mode-values";
++const char CameraParameters::KEY_MAX_NUM_FOCUS_AREAS[] = "max-num-focus-areas";
++const char CameraParameters::KEY_FOCUS_AREAS[] = "focus-areas";
++const char CameraParameters::KEY_FOCAL_LENGTH[] = "focal-length";
++const char CameraParameters::KEY_HORIZONTAL_VIEW_ANGLE[] = "horizontal-view-angle";
++const char CameraParameters::KEY_VERTICAL_VIEW_ANGLE[] = "vertical-view-angle";
++const char CameraParameters::KEY_EXPOSURE_COMPENSATION[] = "exposure-compensation";
++const char CameraParameters::KEY_MAX_EXPOSURE_COMPENSATION[] = "max-exposure-compensation";
++const char CameraParameters::KEY_MIN_EXPOSURE_COMPENSATION[] = "min-exposure-compensation";
++const char CameraParameters::KEY_EXPOSURE_COMPENSATION_STEP[] = "exposure-compensation-step";
++const char CameraParameters::KEY_AUTO_EXPOSURE_LOCK[] = "auto-exposure-lock";
++const char CameraParameters::KEY_AUTO_EXPOSURE_LOCK_SUPPORTED[] = "auto-exposure-lock-supported";
++const char CameraParameters::KEY_AUTO_WHITEBALANCE_LOCK[] = "auto-whitebalance-lock";
++const char CameraParameters::KEY_AUTO_WHITEBALANCE_LOCK_SUPPORTED[] = "auto-whitebalance-lock-supported";
++const char CameraParameters::KEY_MAX_NUM_METERING_AREAS[] = "max-num-metering-areas";
++const char CameraParameters::KEY_METERING_AREAS[] = "metering-areas";
++const char CameraParameters::KEY_ZOOM[] = "zoom";
++const char CameraParameters::KEY_MAX_ZOOM[] = "max-zoom";
++const char CameraParameters::KEY_ZOOM_RATIOS[] = "zoom-ratios";
++const char CameraParameters::KEY_ZOOM_SUPPORTED[] = "zoom-supported";
++const char CameraParameters::KEY_SMOOTH_ZOOM_SUPPORTED[] = "smooth-zoom-supported";
++const char CameraParameters::KEY_FOCUS_DISTANCES[] = "focus-distances";
++const char CameraParameters::KEY_VIDEO_FRAME_FORMAT[] = "video-frame-format";
++const char CameraParameters::KEY_VIDEO_SIZE[] = "video-size";
++const char CameraParameters::KEY_SUPPORTED_VIDEO_SIZES[] = "video-size-values";
++const char CameraParameters::KEY_PREFERRED_PREVIEW_SIZE_FOR_VIDEO[] = "preferred-preview-size-for-video";
++const char CameraParameters::KEY_MAX_NUM_DETECTED_FACES_HW[] = "max-num-detected-faces-hw";
++const char CameraParameters::KEY_MAX_NUM_DETECTED_FACES_SW[] = "max-num-detected-faces-sw";
++const char CameraParameters::KEY_RECORDING_HINT[] = "recording-hint";
++const char CameraParameters::KEY_VIDEO_SNAPSHOT_SUPPORTED[] = "video-snapshot-supported";
++const char CameraParameters::KEY_VIDEO_STABILIZATION[] = "video-stabilization";
++const char CameraParameters::KEY_VIDEO_STABILIZATION_SUPPORTED[] = "video-stabilization-supported";
++const char CameraParameters::KEY_LIGHTFX[] = "light-fx";
++
++const char CameraParameters::TRUE[] = "true";
++const char CameraParameters::FALSE[] = "false";
++const char CameraParameters::FOCUS_DISTANCE_INFINITY[] = "Infinity";
++
++// Values for white balance settings.
++const char CameraParameters::WHITE_BALANCE_AUTO[] = "auto";
++const char CameraParameters::WHITE_BALANCE_INCANDESCENT[] = "incandescent";
++const char CameraParameters::WHITE_BALANCE_FLUORESCENT[] = "fluorescent";
++const char CameraParameters::WHITE_BALANCE_WARM_FLUORESCENT[] = "warm-fluorescent";
++const char CameraParameters::WHITE_BALANCE_DAYLIGHT[] = "daylight";
++const char CameraParameters::WHITE_BALANCE_CLOUDY_DAYLIGHT[] = "cloudy-daylight";
++const char CameraParameters::WHITE_BALANCE_TWILIGHT[] = "twilight";
++const char CameraParameters::WHITE_BALANCE_SHADE[] = "shade";
++
++// Values for effect settings.
++const char CameraParameters::EFFECT_NONE[] = "none";
++const char CameraParameters::EFFECT_MONO[] = "mono";
++const char CameraParameters::EFFECT_NEGATIVE[] = "negative";
++const char CameraParameters::EFFECT_SOLARIZE[] = "solarize";
++const char CameraParameters::EFFECT_SEPIA[] = "sepia";
++const char CameraParameters::EFFECT_POSTERIZE[] = "posterize";
++const char CameraParameters::EFFECT_WHITEBOARD[] = "whiteboard";
++const char CameraParameters::EFFECT_BLACKBOARD[] = "blackboard";
++const char CameraParameters::EFFECT_AQUA[] = "aqua";
++
++// Values for antibanding settings.
++const char CameraParameters::ANTIBANDING_AUTO[] = "auto";
++const char CameraParameters::ANTIBANDING_50HZ[] = "50hz";
++const char CameraParameters::ANTIBANDING_60HZ[] = "60hz";
++const char CameraParameters::ANTIBANDING_OFF[] = "off";
++
++// Values for flash mode settings.
++const char CameraParameters::FLASH_MODE_OFF[] = "off";
++const char CameraParameters::FLASH_MODE_AUTO[] = "auto";
++const char CameraParameters::FLASH_MODE_ON[] = "on";
++const char CameraParameters::FLASH_MODE_RED_EYE[] = "red-eye";
++const char CameraParameters::FLASH_MODE_TORCH[] = "torch";
++
++// Values for scene mode settings.
++const char CameraParameters::SCENE_MODE_AUTO[] = "auto";
++const char CameraParameters::SCENE_MODE_ACTION[] = "action";
++const char CameraParameters::SCENE_MODE_PORTRAIT[] = "portrait";
++const char CameraParameters::SCENE_MODE_LANDSCAPE[] = "landscape";
++const char CameraParameters::SCENE_MODE_NIGHT[] = "night";
++const char CameraParameters::SCENE_MODE_NIGHT_PORTRAIT[] = "night-portrait";
++const char CameraParameters::SCENE_MODE_THEATRE[] = "theatre";
++const char CameraParameters::SCENE_MODE_BEACH[] = "beach";
++const char CameraParameters::SCENE_MODE_SNOW[] = "snow";
++const char CameraParameters::SCENE_MODE_SUNSET[] = "sunset";
++const char CameraParameters::SCENE_MODE_STEADYPHOTO[] = "steadyphoto";
++const char CameraParameters::SCENE_MODE_FIREWORKS[] = "fireworks";
++const char CameraParameters::SCENE_MODE_SPORTS[] = "sports";
++const char CameraParameters::SCENE_MODE_PARTY[] = "party";
++const char CameraParameters::SCENE_MODE_CANDLELIGHT[] = "candlelight";
++const char CameraParameters::SCENE_MODE_BARCODE[] = "barcode";
++const char CameraParameters::SCENE_MODE_HDR[] = "hdr";
++
++const char CameraParameters::PIXEL_FORMAT_YUV422SP[] = "yuv422sp";
++const char CameraParameters::PIXEL_FORMAT_YUV420SP[] = "yuv420sp";
++const char CameraParameters::PIXEL_FORMAT_YUV422I[] = "yuv422i-yuyv";
++const char CameraParameters::PIXEL_FORMAT_YUV420P[]  = "yuv420p";
++const char CameraParameters::PIXEL_FORMAT_RGB565[] = "rgb565";
++const char CameraParameters::PIXEL_FORMAT_RGBA8888[] = "rgba8888";
++const char CameraParameters::PIXEL_FORMAT_JPEG[] = "jpeg";
++const char CameraParameters::PIXEL_FORMAT_BAYER_RGGB[] = "bayer-rggb";
++const char CameraParameters::PIXEL_FORMAT_ANDROID_OPAQUE[] = "android-opaque";
++
++// Values for focus mode settings.
++const char CameraParameters::FOCUS_MODE_AUTO[] = "auto";
++const char CameraParameters::FOCUS_MODE_INFINITY[] = "infinity";
++const char CameraParameters::FOCUS_MODE_MACRO[] = "macro";
++const char CameraParameters::FOCUS_MODE_FIXED[] = "fixed";
++const char CameraParameters::FOCUS_MODE_EDOF[] = "edof";
++const char CameraParameters::FOCUS_MODE_CONTINUOUS_VIDEO[] = "continuous-video";
++const char CameraParameters::FOCUS_MODE_CONTINUOUS_PICTURE[] = "continuous-picture";
++
++// Values for light fx settings
++const char CameraParameters::LIGHTFX_LOWLIGHT[] = "low-light";
++const char CameraParameters::LIGHTFX_HDR[] = "high-dynamic-range";
++
++CameraParameters::CameraParameters()
++                : mMap()
++{
++}
++
++CameraParameters::~CameraParameters()
++{
++}
++
++String8 CameraParameters::flatten() const
++{
++    String8 flattened("");
++    size_t size = mMap.size();
++
++    for (size_t i = 0; i < size; i++) {
++        String8 k, v;
++        k = mMap.keyAt(i);
++        v = mMap.valueAt(i);
++
++        flattened += k;
++        flattened += "=";
++        flattened += v;
++        if (i != size-1)
++            flattened += ";";
++    }
++
++    return flattened;
++}
++
++void CameraParameters::unflatten(const String8 &params)
++{
++    const char *a = params.c_str();
++    const char *b;
++
++    mMap.clear();
++
++    for (;;) {
++        // Find the bounds of the key name.
++        b = strchr(a, '=');
++        if (b == 0)
++            break;
++
++        // Create the key string.
++        String8 k(a, (size_t)(b-a));
++
++        // Find the value.
++        a = b+1;
++        b = strchr(a, ';');
++        if (b == 0) {
++            // If there's no semicolon, this is the last item.
++            String8 v(a);
++            mMap.add(k, v);
++            break;
++        }
++
++        String8 v(a, (size_t)(b-a));
++        mMap.add(k, v);
++        a = b+1;
++    }
++}
++
++
++void CameraParameters::set(const char *key, const char *value)
++{
++    // XXX i think i can do this with strspn()
++    if (strchr(key, '=') || strchr(key, ';')) {
++        //XXX ALOGE("Key \"%s\"contains invalid character (= or ;)", key);
++        return;
++    }
++
++    if (strchr(value, '=') || strchr(value, ';')) {
++        //XXX ALOGE("Value \"%s\"contains invalid character (= or ;)", value);
++        return;
++    }
++
++    mMap.replaceValueFor(String8(key), String8(value));
++}
++
++void CameraParameters::set(const char *key, int value)
++{
++    char str[16];
++    sprintf(str, "%d", value);
++    set(key, str);
++}
++
++void CameraParameters::setFloat(const char *key, float value)
++{
++    char str[16];  // 14 should be enough. We overestimate to be safe.
++    snprintf(str, sizeof(str), "%g", value);
++    set(key, str);
++}
++
++const char *CameraParameters::get(const char *key) const
++{
++    String8 v = mMap.valueFor(String8(key));
++    if (v.length() == 0)
++        return 0;
++    return v.c_str();
++}
++
++int CameraParameters::getInt(const char *key) const
++{
++    const char *v = get(key);
++    if (v == 0)
++        return -1;
++    return strtol(v, 0, 0);
++}
++
++float CameraParameters::getFloat(const char *key) const
++{
++    const char *v = get(key);
++    if (v == 0) return -1;
++    return strtof(v, 0);
++}
++
++void CameraParameters::remove(const char *key)
++{
++    mMap.removeItem(String8(key));
++}
++
++// Parse string like "640x480" or "10000,20000"
++static int parse_pair(const char *str, int *first, int *second, char delim,
++                      char **endptr = NULL)
++{
++    // Find the first integer.
++    char *end;
++    int w = (int)strtol(str, &end, 10);
++    // If a delimiter does not immediately follow, give up.
++    if (*end != delim) {
++        ALOGE("Cannot find delimiter (%c) in str=%s", delim, str);
++        return -1;
++    }
++
++    // Find the second integer, immediately after the delimiter.
++    int h = (int)strtol(end+1, &end, 10);
++
++    *first = w;
++    *second = h;
++
++    if (endptr) {
++        *endptr = end;
++    }
++
++    return 0;
++}
++
++static void parseSizesList(const char *sizesStr, Vector<Size> &sizes)
++{
++    if (sizesStr == 0) {
++        return;
++    }
++
++    char *sizeStartPtr = (char *)sizesStr;
++
++    while (true) {
++        int width, height;
++        int success = parse_pair(sizeStartPtr, &width, &height, 'x',
++                                 &sizeStartPtr);
++        if (success == -1 || (*sizeStartPtr != ',' && *sizeStartPtr != '\0')) {
++            ALOGE("Picture sizes string \"%s\" contains invalid character.", sizesStr);
++            return;
++        }
++        sizes.push(Size(width, height));
++
++        if (*sizeStartPtr == '\0') {
++            return;
++        }
++        sizeStartPtr++;
++    }
++}
++
++void CameraParameters::setPreviewSize(int width, int height)
++{
++    char str[32];
++    sprintf(str, "%dx%d", width, height);
++    set(KEY_PREVIEW_SIZE, str);
++}
++
++void CameraParameters::getPreviewSize(int *width, int *height) const
++{
++    *width = *height = -1;
++    // Get the current string, if it doesn't exist, leave the -1x-1
++    const char *p = get(KEY_PREVIEW_SIZE);
++    if (p == 0)  return;
++    parse_pair(p, width, height, 'x');
++}
++
++void CameraParameters::getPreferredPreviewSizeForVideo(int *width, int *height) const
++{
++    *width = *height = -1;
++    const char *p = get(KEY_PREFERRED_PREVIEW_SIZE_FOR_VIDEO);
++    if (p == 0)  return;
++    parse_pair(p, width, height, 'x');
++}
++
++void CameraParameters::getSupportedPreviewSizes(Vector<Size> &sizes) const
++{
++    const char *previewSizesStr = get(KEY_SUPPORTED_PREVIEW_SIZES);
++    parseSizesList(previewSizesStr, sizes);
++}
++
++void CameraParameters::setVideoSize(int width, int height)
++{
++    char str[32];
++    sprintf(str, "%dx%d", width, height);
++    set(KEY_VIDEO_SIZE, str);
++}
++
++void CameraParameters::getVideoSize(int *width, int *height) const
++{
++    *width = *height = -1;
++    const char *p = get(KEY_VIDEO_SIZE);
++    if (p == 0) return;
++    parse_pair(p, width, height, 'x');
++}
++
++void CameraParameters::getSupportedVideoSizes(Vector<Size> &sizes) const
++{
++    const char *videoSizesStr = get(KEY_SUPPORTED_VIDEO_SIZES);
++    parseSizesList(videoSizesStr, sizes);
++}
++
++void CameraParameters::setPreviewFrameRate(int fps)
++{
++    set(KEY_PREVIEW_FRAME_RATE, fps);
++}
++
++int CameraParameters::getPreviewFrameRate() const
++{
++    return getInt(KEY_PREVIEW_FRAME_RATE);
++}
++
++void CameraParameters::getPreviewFpsRange(int *min_fps, int *max_fps) const
++{
++    *min_fps = *max_fps = -1;
++    const char *p = get(KEY_PREVIEW_FPS_RANGE);
++    if (p == 0) return;
++    parse_pair(p, min_fps, max_fps, ',');
++}
++
++void CameraParameters::setPreviewFormat(const char *format)
++{
++    set(KEY_PREVIEW_FORMAT, format);
++}
++
++const char *CameraParameters::getPreviewFormat() const
++{
++    return get(KEY_PREVIEW_FORMAT);
++}
++
++void CameraParameters::setPictureSize(int width, int height)
++{
++    char str[32];
++    sprintf(str, "%dx%d", width, height);
++    set(KEY_PICTURE_SIZE, str);
++}
++
++void CameraParameters::getPictureSize(int *width, int *height) const
++{
++    *width = *height = -1;
++    // Get the current string, if it doesn't exist, leave the -1x-1
++    const char *p = get(KEY_PICTURE_SIZE);
++    if (p == 0) return;
++    parse_pair(p, width, height, 'x');
++}
++
++void CameraParameters::getSupportedPictureSizes(Vector<Size> &sizes) const
++{
++    const char *pictureSizesStr = get(KEY_SUPPORTED_PICTURE_SIZES);
++    parseSizesList(pictureSizesStr, sizes);
++}
++
++void CameraParameters::setPictureFormat(const char *format)
++{
++    set(KEY_PICTURE_FORMAT, format);
++}
++
++const char *CameraParameters::getPictureFormat() const
++{
++    return get(KEY_PICTURE_FORMAT);
++}
++
++void CameraParameters::dump() const
++{
++    ALOGD("dump: mMap.size = %zu", mMap.size());
++    for (size_t i = 0; i < mMap.size(); i++) {
++        String8 k, v;
++        k = mMap.keyAt(i);
++        v = mMap.valueAt(i);
++        ALOGD("%s: %s\n", k.c_str(), v.c_str());
++    }
++}
++
++status_t CameraParameters::dump(int fd, const Vector<String16>& /*args*/) const
++{
++    const size_t SIZE = 256;
++    char buffer[SIZE];
++    String8 result;
++    snprintf(buffer, 255, "CameraParameters::dump: mMap.size = %zu\n", mMap.size());
++    result.append(buffer);
++    for (size_t i = 0; i < mMap.size(); i++) {
++        String8 k, v;
++        k = mMap.keyAt(i);
++        v = mMap.valueAt(i);
++        snprintf(buffer, 255, "\t%s: %s\n", k.c_str(), v.c_str());
++        result.append(buffer);
++    }
++    write(fd, result.c_str(), result.size());
++    return NO_ERROR;
++}
++
++void CameraParameters::getSupportedPreviewFormats(Vector<int>& formats) const {
++    const char* supportedPreviewFormats =
++          get(CameraParameters::KEY_SUPPORTED_PREVIEW_FORMATS);
++
++    if (supportedPreviewFormats == NULL) {
++        ALOGW("%s: No supported preview formats.", __FUNCTION__);
++        return;
++    }
++
++    String8 fmtStr(supportedPreviewFormats);
++    char* prevFmts = fmtStr.lockBuffer(fmtStr.size());
++
++    char* savePtr;
++    char* fmt = strtok_r(prevFmts, ",", &savePtr);
++    while (fmt) {
++        int actual = previewFormatToEnum(fmt);
++        if (actual != -1) {
++            formats.add(actual);
++        }
++        fmt = strtok_r(NULL, ",", &savePtr);
++    }
++    fmtStr.unlockBuffer(fmtStr.size());
++}
++
++
++int CameraParameters::previewFormatToEnum(const char* format) {
++    return
++        !format ?
++            HAL_PIXEL_FORMAT_YCrCb_420_SP :
++        !strcmp(format, PIXEL_FORMAT_YUV422SP) ?
++            HAL_PIXEL_FORMAT_YCbCr_422_SP : // NV16
++        !strcmp(format, PIXEL_FORMAT_YUV420SP) ?
++            HAL_PIXEL_FORMAT_YCrCb_420_SP : // NV21
++        !strcmp(format, PIXEL_FORMAT_YUV422I) ?
++            HAL_PIXEL_FORMAT_YCbCr_422_I :  // YUY2
++        !strcmp(format, PIXEL_FORMAT_YUV420P) ?
++            HAL_PIXEL_FORMAT_YV12 :         // YV12
++        !strcmp(format, PIXEL_FORMAT_RGB565) ?
++            HAL_PIXEL_FORMAT_RGB_565 :      // RGB565
++        !strcmp(format, PIXEL_FORMAT_RGBA8888) ?
++            HAL_PIXEL_FORMAT_RGBA_8888 :    // RGB8888
++        !strcmp(format, PIXEL_FORMAT_BAYER_RGGB) ?
++            HAL_PIXEL_FORMAT_RAW16 :   // Raw sensor data
++        -1;
++}
++
++bool CameraParameters::isEmpty() const {
++    return mMap.isEmpty();
++}
++
++}; // namespace android
+--- /dev/null
++++ b/camera/client/CameraMetadata.cpp
+@@ -0,0 +1,730 @@
++// Vendor copy of frameworks/av/camera/CameraMetadata.cpp at b6b36c1fdb3c6ffced822a054fbf035b544f0de2.
++// Built into the vendor libcamera_client needed by the Exynos 7420 camera blobs.
++// removePermissionEntries() and getTagFromName() are omitted: they need
++// VendorTagDescriptor, and no vendor camera library calls them.
++/*
++ * Copyright (C) 2012 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// #define LOG_NDEBUG 0
++
++#define LOG_TAG "Camera2-Metadata"
++#include <utils/Log.h>
++#include <utils/Errors.h>
++
++#include <binder/Parcel.h>
++#include <camera/CameraMetadata.h>
++#include <camera_metadata_hidden.h>
++
++#include <algorithm>
++
++namespace android {
++
++#define ALIGN_TO(val, alignment) \
++    (((uintptr_t)(val) + ((alignment) - 1)) & ~((alignment) - 1))
++
++typedef Parcel::WritableBlob WritableBlob;
++typedef Parcel::ReadableBlob ReadableBlob;
++
++CameraMetadata::CameraMetadata() :
++        mBuffer(NULL), mLocked(false) {
++}
++
++CameraMetadata::CameraMetadata(size_t entryCapacity, size_t dataCapacity) :
++        mLocked(false)
++{
++    mBuffer = allocate_camera_metadata(entryCapacity, dataCapacity);
++}
++
++CameraMetadata::CameraMetadata(const CameraMetadata &other) :
++        mLocked(false) {
++    mBuffer = clone_camera_metadata(other.mBuffer);
++}
++
++CameraMetadata::CameraMetadata(CameraMetadata &&other) :mBuffer(NULL),  mLocked(false) {
++    acquire(other);
++}
++
++CameraMetadata &CameraMetadata::operator=(CameraMetadata &&other) {
++    acquire(other);
++    return *this;
++}
++
++CameraMetadata::CameraMetadata(camera_metadata_t *buffer) :
++        mBuffer(NULL), mLocked(false) {
++    acquire(buffer);
++}
++
++CameraMetadata &CameraMetadata::operator=(const CameraMetadata &other) {
++    return operator=(other.mBuffer);
++}
++
++CameraMetadata &CameraMetadata::operator=(const camera_metadata_t *buffer) {
++    if (mLocked) {
++        ALOGE("%s: Assignment to a locked CameraMetadata!", __FUNCTION__);
++        return *this;
++    }
++
++    if (CC_LIKELY(buffer != mBuffer)) {
++        camera_metadata_t *newBuffer = clone_camera_metadata(buffer);
++        clear();
++        mBuffer = newBuffer;
++    }
++    return *this;
++}
++
++CameraMetadata::~CameraMetadata() {
++    mLocked = false;
++    clear();
++}
++
++const camera_metadata_t* CameraMetadata::getAndLock() const {
++    mLocked = true;
++    return mBuffer;
++}
++
++status_t CameraMetadata::unlock(const camera_metadata_t *buffer) const {
++    if (!mLocked) {
++        ALOGE("%s: Can't unlock a non-locked CameraMetadata!", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    if (buffer != mBuffer) {
++        ALOGE("%s: Can't unlock CameraMetadata with wrong pointer!",
++                __FUNCTION__);
++        return BAD_VALUE;
++    }
++    mLocked = false;
++    return OK;
++}
++
++camera_metadata_t* CameraMetadata::release() {
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return NULL;
++    }
++    camera_metadata_t *released = mBuffer;
++    mBuffer = NULL;
++    return released;
++}
++
++void CameraMetadata::clear() {
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return;
++    }
++    if (mBuffer) {
++        free_camera_metadata(mBuffer);
++        mBuffer = NULL;
++    }
++}
++
++void CameraMetadata::acquire(camera_metadata_t *buffer) {
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return;
++    }
++    clear();
++    mBuffer = buffer;
++
++    IF_ALOGV() {
++        ALOGE_IF(validate_camera_metadata_structure(mBuffer, /*size*/NULL) != OK,
++                 "%s: Failed to validate metadata structure %p",
++                 __FUNCTION__, buffer);
++    }
++}
++
++void CameraMetadata::acquire(CameraMetadata &other) {
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return;
++    }
++    acquire(other.release());
++}
++
++status_t CameraMetadata::append(const CameraMetadata &other) {
++    return append(other.mBuffer);
++}
++
++status_t CameraMetadata::append(const camera_metadata_t* other) {
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    size_t extraEntries = get_camera_metadata_entry_count(other);
++    size_t extraData = get_camera_metadata_data_count(other);
++    resizeIfNeeded(extraEntries, extraData);
++
++    return append_camera_metadata(mBuffer, other);
++}
++
++size_t CameraMetadata::entryCount() const {
++    return (mBuffer == NULL) ? 0 :
++            get_camera_metadata_entry_count(mBuffer);
++}
++
++bool CameraMetadata::isEmpty() const {
++    return entryCount() == 0;
++}
++
++size_t CameraMetadata::bufferSize() const {
++    return (mBuffer == NULL) ? 0 :
++            get_camera_metadata_size(mBuffer);
++}
++
++status_t CameraMetadata::sort() {
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    return sort_camera_metadata(mBuffer);
++}
++
++status_t CameraMetadata::checkType(uint32_t tag, uint8_t expectedType) {
++    int tagType = get_local_camera_metadata_tag_type(tag, mBuffer);
++    if ( CC_UNLIKELY(tagType == -1)) {
++        ALOGE("Update metadata entry: Unknown tag %d", tag);
++        return INVALID_OPERATION;
++    }
++    if ( CC_UNLIKELY(tagType != expectedType) ) {
++        ALOGE("Mismatched tag type when updating entry %s (%d) of type %s; "
++                "got type %s data instead ",
++                get_local_camera_metadata_tag_name(tag, mBuffer), tag,
++                camera_metadata_type_names[tagType],
++                camera_metadata_type_names[expectedType]);
++        return INVALID_OPERATION;
++    }
++    return OK;
++}
++
++status_t CameraMetadata::update(uint32_t tag,
++        const int32_t *data, size_t data_count) {
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    if ( (res = checkType(tag, TYPE_INT32)) != OK) {
++        return res;
++    }
++    return updateImpl(tag, (const void*)data, data_count);
++}
++
++status_t CameraMetadata::update(uint32_t tag,
++        const uint8_t *data, size_t data_count) {
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    if ( (res = checkType(tag, TYPE_BYTE)) != OK) {
++        return res;
++    }
++    return updateImpl(tag, (const void*)data, data_count);
++}
++
++status_t CameraMetadata::update(uint32_t tag,
++        const float *data, size_t data_count) {
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    if ( (res = checkType(tag, TYPE_FLOAT)) != OK) {
++        return res;
++    }
++    return updateImpl(tag, (const void*)data, data_count);
++}
++
++status_t CameraMetadata::update(uint32_t tag,
++        const int64_t *data, size_t data_count) {
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    if ( (res = checkType(tag, TYPE_INT64)) != OK) {
++        return res;
++    }
++    return updateImpl(tag, (const void*)data, data_count);
++}
++
++status_t CameraMetadata::update(uint32_t tag,
++        const double *data, size_t data_count) {
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    if ( (res = checkType(tag, TYPE_DOUBLE)) != OK) {
++        return res;
++    }
++    return updateImpl(tag, (const void*)data, data_count);
++}
++
++status_t CameraMetadata::update(uint32_t tag,
++        const camera_metadata_rational_t *data, size_t data_count) {
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    if ( (res = checkType(tag, TYPE_RATIONAL)) != OK) {
++        return res;
++    }
++    return updateImpl(tag, (const void*)data, data_count);
++}
++
++status_t CameraMetadata::update(uint32_t tag,
++        const String8 &string) {
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    if ( (res = checkType(tag, TYPE_BYTE)) != OK) {
++        return res;
++    }
++    // string.size() doesn't count the null termination character.
++    return updateImpl(tag, (const void*)string.c_str(), string.size() + 1);
++}
++
++status_t CameraMetadata::update(const camera_metadata_ro_entry &entry) {
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    if ( (res = checkType(entry.tag, entry.type)) != OK) {
++        return res;
++    }
++    return updateImpl(entry.tag, (const void*)entry.data.u8, entry.count);
++}
++
++status_t CameraMetadata::updateImpl(uint32_t tag, const void *data,
++        size_t data_count) {
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    int type = get_local_camera_metadata_tag_type(tag, mBuffer);
++    if (type == -1) {
++        ALOGE("%s: Tag %d not found", __FUNCTION__, tag);
++        return BAD_VALUE;
++    }
++    // Safety check - ensure that data isn't pointing to this metadata, since
++    // that would get invalidated if a resize is needed
++    size_t bufferSize = get_camera_metadata_size(mBuffer);
++    uintptr_t bufAddr = reinterpret_cast<uintptr_t>(mBuffer);
++    uintptr_t dataAddr = reinterpret_cast<uintptr_t>(data);
++    if (dataAddr > bufAddr && dataAddr < (bufAddr + bufferSize)) {
++        ALOGE("%s: Update attempted with data from the same metadata buffer!",
++                __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++
++    size_t data_size = calculate_camera_metadata_entry_data_size(type,
++            data_count);
++
++    res = resizeIfNeeded(1, data_size);
++
++    if (res == OK) {
++        camera_metadata_entry_t entry;
++        res = find_camera_metadata_entry(mBuffer, tag, &entry);
++        if (res == NAME_NOT_FOUND) {
++            res = add_camera_metadata_entry(mBuffer,
++                    tag, data, data_count);
++        } else if (res == OK) {
++            res = update_camera_metadata_entry(mBuffer,
++                    entry.index, data, data_count, NULL);
++        }
++    }
++
++    if (res != OK) {
++        ALOGE("%s: Unable to update metadata entry %s.%s (%x): %s (%d)",
++                __FUNCTION__, get_local_camera_metadata_section_name(tag, mBuffer),
++                get_local_camera_metadata_tag_name(tag, mBuffer), tag,
++                strerror(-res), res);
++    }
++
++    IF_ALOGV() {
++        ALOGE_IF(validate_camera_metadata_structure(mBuffer, /*size*/NULL) !=
++                 OK,
++
++                 "%s: Failed to validate metadata structure after update %p",
++                 __FUNCTION__, mBuffer);
++    }
++
++    return res;
++}
++
++bool CameraMetadata::exists(uint32_t tag) const {
++    camera_metadata_ro_entry entry;
++    return find_camera_metadata_ro_entry(mBuffer, tag, &entry) == 0;
++}
++
++camera_metadata_entry_t CameraMetadata::find(uint32_t tag) {
++    status_t res;
++    camera_metadata_entry entry;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        entry.count = 0;
++        return entry;
++    }
++    res = find_camera_metadata_entry(mBuffer, tag, &entry);
++    if (CC_UNLIKELY( res != OK )) {
++        entry.count = 0;
++        entry.data.u8 = NULL;
++    }
++    return entry;
++}
++
++camera_metadata_ro_entry_t CameraMetadata::find(uint32_t tag) const {
++    status_t res;
++    camera_metadata_ro_entry entry;
++    res = find_camera_metadata_ro_entry(mBuffer, tag, &entry);
++    if (CC_UNLIKELY( res != OK )) {
++        entry.count = 0;
++        entry.data.u8 = NULL;
++    }
++    return entry;
++}
++
++status_t CameraMetadata::erase(uint32_t tag) {
++    camera_metadata_entry_t entry;
++    status_t res;
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++    res = find_camera_metadata_entry(mBuffer, tag, &entry);
++    if (res == NAME_NOT_FOUND) {
++        return OK;
++    } else if (res != OK) {
++        ALOGE("%s: Error looking for entry %s.%s (%x): %s %d",
++                __FUNCTION__,
++                get_local_camera_metadata_section_name(tag, mBuffer),
++                get_local_camera_metadata_tag_name(tag, mBuffer),
++                tag, strerror(-res), res);
++        return res;
++    }
++    res = delete_camera_metadata_entry(mBuffer, entry.index);
++    if (res != OK) {
++        ALOGE("%s: Error deleting entry %s.%s (%x): %s %d",
++                __FUNCTION__,
++                get_local_camera_metadata_section_name(tag, mBuffer),
++                get_local_camera_metadata_tag_name(tag, mBuffer),
++                tag, strerror(-res), res);
++    }
++    return res;
++}
++
++void CameraMetadata::dump(int fd, int verbosity, int indentation) const {
++    dump_indented_camera_metadata(mBuffer, fd, verbosity, indentation);
++}
++
++status_t CameraMetadata::resizeIfNeeded(size_t extraEntries, size_t extraData) {
++    if (mBuffer == NULL) {
++        mBuffer = allocate_camera_metadata(extraEntries * 2, extraData * 2);
++        if (mBuffer == NULL) {
++            ALOGE("%s: Can't allocate larger metadata buffer", __FUNCTION__);
++            return NO_MEMORY;
++        }
++    } else {
++        size_t currentEntryCount = get_camera_metadata_entry_count(mBuffer);
++        size_t currentEntryCap = get_camera_metadata_entry_capacity(mBuffer);
++        size_t newEntryCount = currentEntryCount +
++                extraEntries;
++        newEntryCount = (newEntryCount > currentEntryCap) ?
++                newEntryCount * 2 : currentEntryCap;
++
++        size_t currentDataCount = get_camera_metadata_data_count(mBuffer);
++        size_t currentDataCap = get_camera_metadata_data_capacity(mBuffer);
++        size_t newDataCount = currentDataCount +
++                extraData;
++        newDataCount = (newDataCount > currentDataCap) ?
++                newDataCount * 2 : currentDataCap;
++
++        if (newEntryCount > currentEntryCap ||
++                newDataCount > currentDataCap) {
++            camera_metadata_t *oldBuffer = mBuffer;
++            mBuffer = allocate_camera_metadata(newEntryCount,
++                    newDataCount);
++            if (mBuffer == NULL) {
++                // Maintain old buffer to avoid potential memory leak.
++                mBuffer = oldBuffer;
++                ALOGE("%s: Can't allocate larger metadata buffer", __FUNCTION__);
++                return NO_MEMORY;
++            }
++            append_camera_metadata(mBuffer, oldBuffer);
++            free_camera_metadata(oldBuffer);
++        }
++    }
++    return OK;
++}
++
++status_t CameraMetadata::readFromParcel(const Parcel& data,
++                                        camera_metadata_t** out) {
++
++    status_t err = OK;
++
++    camera_metadata_t* metadata = NULL;
++
++    if (out) {
++        *out = NULL;
++    }
++
++    // See CameraMetadata::writeToParcel for parcel data layout diagram and explanation.
++    // arg0 = blobSize (int32)
++    int32_t blobSizeTmp = -1;
++    if ((err = data.readInt32(&blobSizeTmp)) != OK) {
++        ALOGE("%s: Failed to read metadata size (error %d %s)",
++              __FUNCTION__, err, strerror(-err));
++        return err;
++    }
++    const size_t blobSize = static_cast<size_t>(blobSizeTmp);
++    const size_t alignment = get_camera_metadata_alignment();
++
++    // Special case: zero blob size means zero sized (NULL) metadata.
++    if (blobSize == 0) {
++        ALOGV("%s: Read 0-sized metadata", __FUNCTION__);
++        return OK;
++    }
++
++    if (blobSize <= alignment) {
++        ALOGE("%s: metadata blob is malformed, blobSize(%zu) should be larger than alignment(%zu)",
++                __FUNCTION__, blobSize, alignment);
++        return BAD_VALUE;
++    }
++
++    const size_t metadataSize = blobSize - alignment;
++
++    // NOTE: this doesn't make sense to me. shouldn't the blob
++    // know how big it is? why do we have to specify the size
++    // to Parcel::readBlob ?
++    ReadableBlob blob;
++    // arg1 = metadata (blob)
++    do {
++        if ((err = data.readBlob(blobSize, &blob)) != OK) {
++            ALOGE("%s: Failed to read metadata blob (sized %zu). Possible "
++                  " serialization bug. Error %d %s",
++                  __FUNCTION__, blobSize, err, strerror(-err));
++            break;
++        }
++
++        // arg2 = offset (blob)
++        // Must be after blob since we don't know offset until after writeBlob.
++        int32_t offsetTmp;
++        if ((err = data.readInt32(&offsetTmp)) != OK) {
++            ALOGE("%s: Failed to read metadata offsetTmp (error %d %s)",
++                  __FUNCTION__, err, strerror(-err));
++            break;
++        }
++        const size_t offset = static_cast<size_t>(offsetTmp);
++        if (offset >= alignment) {
++            ALOGE("%s: metadata offset(%zu) should be less than alignment(%zu)",
++                    __FUNCTION__, blobSize, alignment);
++            err = BAD_VALUE;
++            break;
++        }
++
++        const uintptr_t metadataStart = reinterpret_cast<uintptr_t>(blob.data()) + offset;
++        const camera_metadata_t* tmp =
++                       reinterpret_cast<const camera_metadata_t*>(metadataStart);
++        ALOGV("%s: alignment is: %zu, metadata start: %p, offset: %zu",
++                __FUNCTION__, alignment, tmp, offset);
++        metadata = allocate_copy_camera_metadata_checked(tmp, metadataSize);
++        if (metadata == NULL) {
++            // We consider that allocation only fails if the validation
++            // also failed, therefore the readFromParcel was a failure.
++            ALOGE("%s: metadata allocation and copy failed", __FUNCTION__);
++            err = BAD_VALUE;
++        }
++    } while(0);
++    blob.release();
++
++    if (out) {
++        ALOGV("%s: Set out metadata to %p", __FUNCTION__, metadata);
++        *out = metadata;
++    } else if (metadata != NULL) {
++        ALOGV("%s: Freed camera metadata at %p", __FUNCTION__, metadata);
++        free_camera_metadata(metadata);
++    }
++
++    return err;
++}
++
++status_t CameraMetadata::writeToParcel(Parcel& data,
++                                       const camera_metadata_t* metadata) {
++    status_t res = OK;
++
++    /**
++     * Below is the camera metadata parcel layout:
++     *
++     * |--------------------------------------------|
++     * |             arg0: blobSize                 |
++     * |              (length = 4)                  |
++     * |--------------------------------------------|<--Skip the rest if blobSize == 0.
++     * |                                            |
++     * |                                            |
++     * |              arg1: blob                    |
++     * | (length = variable, see arg1 layout below) |
++     * |                                            |
++     * |                                            |
++     * |--------------------------------------------|
++     * |              arg2: offset                  |
++     * |              (length = 4)                  |
++     * |--------------------------------------------|
++     */
++
++    // arg0 = blobSize (int32)
++    if (metadata == NULL) {
++        // Write zero blobSize for null metadata.
++        return data.writeInt32(0);
++    }
++
++    /**
++     * Always make the blob size sufficiently larger, as we need put alignment
++     * padding and metadata into the blob. Since we don't know the alignment
++     * offset before writeBlob. Then write the metadata to aligned offset.
++     */
++    const size_t metadataSize = get_camera_metadata_compact_size(metadata);
++    const size_t alignment = get_camera_metadata_alignment();
++    const size_t blobSize = metadataSize + alignment;
++    res = data.writeInt32(static_cast<int32_t>(blobSize));
++    if (res != OK) {
++        return res;
++    }
++
++    size_t offset = 0;
++    /**
++     * arg1 = metadata (blob).
++     *
++     * The blob size is the sum of front padding size, metadata size and back padding
++     * size, which is equal to metadataSize + alignment.
++     *
++     * The blob layout is:
++     * |------------------------------------|<----Start address of the blob (unaligned).
++     * |           front padding            |
++     * |          (size = offset)           |
++     * |------------------------------------|<----Aligned start address of metadata.
++     * |                                    |
++     * |                                    |
++     * |            metadata                |
++     * |       (size = metadataSize)        |
++     * |                                    |
++     * |                                    |
++     * |------------------------------------|
++     * |           back padding             |
++     * |     (size = alignment - offset)    |
++     * |------------------------------------|<----End address of blob.
++     *                                            (Blob start address + blob size).
++     */
++    WritableBlob blob;
++    do {
++        res = data.writeBlob(blobSize, false, &blob);
++        if (res != OK) {
++            break;
++        }
++        const uintptr_t metadataStart = ALIGN_TO(blob.data(), alignment);
++        offset = metadataStart - reinterpret_cast<uintptr_t>(blob.data());
++        ALOGV("%s: alignment is: %zu, metadata start: %p, offset: %zu",
++                __FUNCTION__, alignment,
++                reinterpret_cast<const void *>(metadataStart), offset);
++        copy_camera_metadata(reinterpret_cast<void*>(metadataStart), metadataSize, metadata);
++
++        // Not too big of a problem since receiving side does hard validation
++        // Don't check the size since the compact size could be larger
++        IF_ALOGV() {
++            if (validate_camera_metadata_structure(metadata, /*size*/NULL) != OK) {
++                ALOGW("%s: Failed to validate metadata %p before writing blob",
++                       __FUNCTION__, metadata);
++            }
++        }
++
++    } while(false);
++    blob.release();
++
++    // arg2 = offset (int32)
++    res = data.writeInt32(static_cast<int32_t>(offset));
++
++    return res;
++}
++
++status_t CameraMetadata::readFromParcel(const Parcel *parcel) {
++
++    ALOGV("%s: parcel = %p", __FUNCTION__, parcel);
++
++    status_t res = OK;
++
++    if (parcel == NULL) {
++        ALOGE("%s: parcel is null", __FUNCTION__);
++        return BAD_VALUE;
++    }
++
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return INVALID_OPERATION;
++    }
++
++    camera_metadata *buffer = NULL;
++    // TODO: reading should return a status code, in case validation fails
++    res = CameraMetadata::readFromParcel(*parcel, &buffer);
++
++    if (res != NO_ERROR) {
++        ALOGE("%s: Failed to read from parcel. Metadata is unchanged.",
++              __FUNCTION__);
++        return res;
++    }
++
++    clear();
++    mBuffer = buffer;
++
++    return OK;
++}
++
++status_t CameraMetadata::writeToParcel(Parcel *parcel) const {
++
++    ALOGV("%s: parcel = %p", __FUNCTION__, parcel);
++
++    if (parcel == NULL) {
++        ALOGE("%s: parcel is null", __FUNCTION__);
++        return BAD_VALUE;
++    }
++
++    return CameraMetadata::writeToParcel(*parcel, mBuffer);
++}
++
++void CameraMetadata::swap(CameraMetadata& other) {
++    if (mLocked) {
++        ALOGE("%s: CameraMetadata is locked", __FUNCTION__);
++        return;
++    } else if (other.mLocked) {
++        ALOGE("%s: Other CameraMetadata is locked", __FUNCTION__);
++        return;
++    }
++
++    camera_metadata* thisBuf = mBuffer;
++    camera_metadata* otherBuf = other.mBuffer;
++
++    other.mBuffer = thisBuf;
++    mBuffer = otherBuf;
++}
++
++metadata_vendor_id_t CameraMetadata::getVendorId() const {
++    return get_camera_metadata_vendor_id(mBuffer);
++}
++
++}; // namespace android
+--- a/camera/Android.bp
++++ b/camera/Android.bp
+@@ -27,6 +27,8 @@
+ cc_library_shared {
+     name: "camera.exynos5",
+     relative_install_path: "hw",
++    // The camera provider is a vendor process; it only searches vendor HAL paths.
++    vendor: true,
+ 
+     srcs: [
+         "CameraWrapper.cpp",
+@@ -48,7 +50,8 @@
+     shared_libs: [
+         "libhardware",
+         "liblog",
+-        "libcamera_client",
++        "libcamera_client_vendor",
++        "libcamera_metadata",
+         "libutils",
+         "libcutils",
+         "android.hidl.token@1.0-utils",
+@@ -60,6 +63,7 @@
+         "frameworks/native/libs/nativewindow/include",
+         "frameworks/native/libs/arect/include",
+         "frameworks/av/media/ndk/include",
++        "frameworks/av/camera/include",
+     ],
+ 
+     header_libs: [
+@@ -67,3 +71,30 @@
+     ],
+ }
+ 
++
++// Vendor processes cannot load the system libcamera_client on Android 16.
++cc_library_shared {
++    name: "libcamera_client_vendor",
++    stem: "libcamera_client",
++    vendor: true,
++    srcs: [
++        "client/CameraMetadata.cpp",
++        "client/CameraParameters.cpp",
++    ],
++    include_dirs: [
++        "frameworks/av/camera/include",
++        "system/media/private/camera/include",
++    ],
++    shared_libs: [
++        "libbinder",
++        "libcamera_metadata",
++        "libcutils",
++        "libexynoscamera_shim",
++        "liblog",
++        "libutils",
++    ],
++    cflags: [
++        "-Wall",
++        "-Werror",
++    ],
++}
+--- a/camera/CameraWrapper.h
++++ b/camera/CameraWrapper.h
+@@ -17,7 +17,7 @@
+ #include <utils/String8.h>
+ #include <hardware/hardware.h>
+ #include <hardware/camera.h>
+-#include <camera/Camera.h>
++#include <utils/Mutex.h>
+ #include <camera/CameraParameters.h>
+ 
+ static android::Mutex gCameraWrapperLock;
+--- a/libshims/libexynoscamera/Android.mk
++++ /dev/null
+@@ -1,28 +0,0 @@
+-# Copyright (C) 2017 The LineageOS Project
+-#
+-# Licensed under the Apache License, Version 2.0 (the "License");
+-# you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at
+-#
+-#      http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS,
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-# See the License for the specific language governing permissions and
+-# limitations under the License.
+-
+-LOCAL_PATH := $(call my-dir)
+-include $(CLEAR_VARS)
+-
+-LOCAL_SRC_FILES := \
+-    CameraParameters.cpp
+-
+-LOCAL_SHARED_LIBRARIES := libhardware libgui_vendor libui
+-
+-LOCAL_MODULE := libexynoscamera_shim
+-LOCAL_MODULE_TAGS := optional
+-LOCAL_MODULE_CLASS := SHARED_LIBRARIES
+-LOCAL_VENDOR_MODULE := true
+-
+-include $(BUILD_SHARED_LIBRARY)
+--- /dev/null
++++ b/libshims/libexynoscamera/Android.bp
+@@ -0,0 +1,12 @@
++// Soong module so libcamera_client_vendor can depend on it; bionic no longer
++// supports LD_SHIM_LIBS injection.
++cc_library_shared {
++    name: "libexynoscamera_shim",
++    vendor: true,
++    srcs: ["CameraParameters.cpp"],
++    shared_libs: [
++        "libgui_vendor",
++        "libhardware",
++        "libui",
++    ],
++}
+--- /dev/null
++++ b/libshims/libandroid_sensor/Android.bp
+@@ -0,0 +1,11 @@
++// libsensorlistener (camera) needs the NDK sensor API from libandroid, which vendor
++// processes cannot load. This library carries the name and depends on the vendor
++// ASensorManager/ALooper implementation.
++cc_library_shared {
++    name: "libandroid_sensor_vendor",
++    stem: "libandroid",
++    vendor: true,
++    srcs: ["libandroid.cpp"],
++    shared_libs: ["libsensorndkbridge"],
++    ldflags: ["-Wl,--no-as-needed"],
++}
+--- /dev/null
++++ b/libshims/libandroid_sensor/libandroid.cpp
+@@ -0,0 +1 @@
++// Intentionally empty: symbols come from the libsensorndkbridge dependency.
+--- a/device-common.mk
++++ b/device-common.mk
+@@ -111,6 +111,12 @@
+ PRODUCT_PACKAGES += \
+ 	libexynoscamera_shim
+ 
++# System libraries needed by the camera blobs, provided to the vendor namespace
++PRODUCT_PACKAGES += \
++	libandroid_sensor_vendor \
++	libgui.vendor \
++	libpower.vendor
++
+ # Charger
+ PRODUCT_PACKAGES += \
+ 	libsuspend

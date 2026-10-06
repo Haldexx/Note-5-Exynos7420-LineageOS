@@ -1,0 +1,35 @@
+--- a/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
++++ b/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
+@@ -64,6 +64,15 @@
+             !android::base::GetBoolProperty("bpf.note5.legacy_active", false));
+ }
+ 
++// Note 5 legacy capability mode whose loader verified and loaded the BPF programs.
++static bool isNote5LegacyBpfActive() {
++    const auto buildType = android::base::GetProperty("ro.build.type", "");
++    return (buildType == "userdebug" || buildType == "eng") &&
++           android::base::GetProperty("ro.product.device", "") == "nobleltespr" &&
++           android::base::GetBoolProperty("ro.note5.legacy_bpf", false) &&
++           android::base::GetBoolProperty("bpf.note5.legacy_active", false);
++}
++
+ static bool fatal = false;
+ 
+ #define ALOGF(s ...) do { ALOGE(s); fatal = true; } while(0)
+@@ -84,7 +93,15 @@
+     char b[255] = {};
+     int v = lgetxattr(path, "security.selinux", &b, sizeof(b));
+     if (v < 0) ALOGF("lgetxattr '%s' errno=%d", path, errno);
+-    if (strncmp(ctxt, b, sizeof(b))) ALOGF("context of '%s' is '%s' != '%s'", path, b, ctxt);
++    if (strncmp(ctxt, b, sizeof(b))) {
++        // A 3.10 kernel without per-file bpffs genfs labels (kernel patch 0013) gives every
++        // object the bpffs root label. Accept only that, only in Note 5 legacy mode.
++        if (!strncmp("u:object_r:fs_bpf:s0", b, sizeof(b)) && isNote5LegacyBpfActive()) {
++            ALOGE("NOTE 5 LEGACY BPF: '%s' has the bpffs root label, expected '%s'", path, ctxt);
++        } else {
++            ALOGF("context of '%s' is '%s' != '%s'", path, b, ctxt);
++        }
++    }
+ 
+     int fd = -1;
+ 

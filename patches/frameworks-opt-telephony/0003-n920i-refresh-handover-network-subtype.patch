@@ -1,0 +1,17 @@
+--- a/src/java/com/android/internal/telephony/data/DataNetwork.java
++++ b/src/java/com/android/internal/telephony/data/DataNetwork.java
+@@ -3843,6 +3843,14 @@
+             // use same data profile between IWLAN and cellular.
+             mDataProfile = mHandoverDataProfile;
+             updateDataNetwork(response);
++            // The legacy IMS client reads NetworkInfo subtype. A handover may
++            // keep the network agent, leaving its original IWLAN/LTE label stale.
++            if (android.os.SystemProperties.getBoolean("ro.note5.legacy_vti", false)
++                    && "nobleltedv".equals(android.os.Build.DEVICE)) {
++                final int networkType = getDataNetworkType();
++                mNetworkAgent.setLegacySubtype(networkType,
++                        TelephonyManager.getNetworkTypeName(networkType));
++            }
+             if (mTransport != AccessNetworkConstants.TRANSPORT_TYPE_WWAN) {
+                 unregisterForWwanEvents();
+             } else {

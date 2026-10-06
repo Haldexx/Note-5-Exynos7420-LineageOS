@@ -1,0 +1,89 @@
+diff --git a/service-t/src/com/android/server/IpSecService.java b/service-t/src/com/android/server/IpSecService.java
+index 54b9ced..6d2d820 100644
+--- a/service-t/src/com/android/server/IpSecService.java
++++ b/service-t/src/com/android/server/IpSecService.java
+@@ -156,6 +156,13 @@ public class IpSecService extends IIpSecService.Stub {
+             return netd;
+         }
+ 
++        /** Legacy VTI matches outer endpoints; XFRM interfaces do not need them. */
++        public boolean requiresLegacyVtiEndpoints() {
++            return android.os.SystemProperties.getBoolean("ro.note5.legacy_vti", false)
++                    && "nobleltedv".equals(
++                            android.os.SystemProperties.get("ro.product.device"));
++        }
++
+         /** Get a instance of IpSecXfrmController */
+         public IpSecXfrmController getIpSecXfrmController() {
+             return new IpSecXfrmController();
+@@ -2077,6 +2084,20 @@ public class IpSecService extends IIpSecService.Stub {
+                 }
+                 transformInfo.finishMigration();
+             }
++
++            // Iwlan supplies dummy creation addresses for modern XFRM interfaces.
++            // VTI requires the negotiated outer endpoints for both TX validation
++            // and RX lookup. OUT defines local -> remote; never reverse it for IN.
++            // Run after migration so c contains the committed new SA endpoints.
++            if (direction == IpSecManager.DIRECTION_OUT && mDeps.requiresLegacyVtiEndpoints()) {
++                mNetd.ipSecUpdateTunnelInterface(
++                        tunnelInterfaceInfo.getInterfaceName(),
++                        c.getSourceAddress(),
++                        c.getDestinationAddress(),
++                        tunnelInterfaceInfo.getIkey(),
++                        tunnelInterfaceInfo.getOkey(),
++                        tunnelInterfaceInfo.getIfId());
++            }
+         } catch (ServiceSpecificException e) {
+             if (e.errorCode == EINVAL) {
+                 throw new IllegalArgumentException(e.toString());
+diff --git a/tests/unit/java/com/android/server/IpSecServiceParameterizedTest.java b/tests/unit/java/com/android/server/IpSecServiceParameterizedTest.java
+index 65beda1..51a5c93 100644
+--- a/tests/unit/java/com/android/server/IpSecServiceParameterizedTest.java
++++ b/tests/unit/java/com/android/server/IpSecServiceParameterizedTest.java
+@@ -906,6 +906,24 @@ public class IpSecServiceParameterizedTest {
+         }
+     }
+ 
++    @Test
++    public void testLegacyVtiOutbound() throws Exception {
++        when(mDeps.requiresLegacyVtiEndpoints()).thenReturn(true);
++        verifyApplyTunnelModeTransformCommon(false, DIRECTION_OUT);
++    }
++
++    @Test
++    public void testLegacyVtiInbound() throws Exception {
++        when(mDeps.requiresLegacyVtiEndpoints()).thenReturn(true);
++        verifyApplyTunnelModeTransformCommon(false, DIRECTION_IN);
++    }
++
++    @Test
++    public void testLegacyVtiForward() throws Exception {
++        when(mDeps.requiresLegacyVtiEndpoints()).thenReturn(true);
++        verifyApplyTunnelModeTransformCommon(false, DIRECTION_FWD);
++    }
++
+     @Test
+     public void testApplyTunnelModeTransformOutbound() throws Exception {
+         verifyApplyTunnelModeTransformCommon(false /* closeSpiBeforeApply */, DIRECTION_OUT);
+@@ -1052,6 +1070,20 @@ public class IpSecServiceParameterizedTest {
+             verify(mMockNetd, never()).ipSecMigrate(any());
+         }
+ 
++        if (mDeps.requiresLegacyVtiEndpoints() && direction == DIRECTION_OUT) {
++            final TunnelInterfaceRecord tunnel = mIpSecService.mUserResourceTracker
++                    .getUserRecord(mUid).mTunnelInterfaceRecords
++                    .getResourceOrThrow(tunnelResourceId);
++            verify(mMockNetd).ipSecUpdateTunnelInterface(
++                    eq(createTunnelResp.interfaceName),
++                    eq(isMigrating ? NEW_SRC_ADDRESS : ipSecConfig.getSourceAddress()),
++                    eq(isMigrating ? NEW_DST_ADDRESS : ipSecConfig.getDestinationAddress()),
++                    eq(tunnel.getIkey()), eq(tunnel.getOkey()), eq(tunnelResourceId));
++        } else {
++            verify(mMockNetd, never()).ipSecUpdateTunnelInterface(
++                    anyString(), anyString(), anyString(), anyInt(), anyInt(), anyInt());
++        }
++
+         return tunnelResourceId;
+     }
+ 

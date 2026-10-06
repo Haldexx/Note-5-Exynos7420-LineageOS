@@ -1,0 +1,29 @@
+From: Haldexx
+Subject: [PATCH] ptrace: do not clear the event message in ptrace_check_attach()
+
+The donor kernel's ptrace_check_attach() starts by zeroing
+child->ptrace_message. Every ptrace request passes through it before it
+is dispatched, so PTRACE_GETEVENTMSG always returned 0: the new pid of a
+PTRACE_EVENT_CLONE/FORK/VFORK, the exit status of PTRACE_EVENT_EXIT and
+the seccomp data were all lost. Upstream 3.10 has no such line.
+
+On Android 16 this disables every tombstone. crash_dump follows the
+crashing process's double clone of its snapshot process with
+PTRACE_O_TRACECLONE, reads pid 0, fails in waitpid(0) ("failed to waitpid
+on child: No child processes") and exits 1. Measured on the SM-N920I with
+a freestanding test: PTRACE_GETEVENTMSG after PTRACE_EVENT_CLONE and
+PTRACE_EVENT_FORK returned msg=0 while the child pids were 12186/12188.
+
+---
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index aa469af2..e518b3ac 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -185,7 +185,6 @@ static void ptrace_unfreeze_traced(struct task_struct *task)
+ static int ptrace_check_attach(struct task_struct *child, bool ignore_state)
+ {
+ 	int ret = -ESRCH;
+-	child->ptrace_message = 0;
+ 
+ 	/*
+ 	 * We take the read lock around doing both checks to close a

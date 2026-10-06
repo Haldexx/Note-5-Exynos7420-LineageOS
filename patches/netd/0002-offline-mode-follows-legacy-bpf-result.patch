@@ -1,0 +1,40 @@
+--- a/server/BandwidthController.cpp
++++ b/server/BandwidthController.cpp
+@@ -204,9 +204,14 @@
+ // Offline boot mode for kernels without BPF program support. Not for release builds.
+ static bool isOfflineBootTest() {
+     const auto buildType = android::base::GetProperty("ro.build.type", "");
+-    return (buildType == "userdebug" || buildType == "eng") &&
+-           android::base::GetBoolProperty("ro.note5.offline_boot", false) &&
+-           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++    if ((buildType != "userdebug" && buildType != "eng") ||
++        android::base::GetProperty("ro.product.device", "") != "nobleltespr") {
++        return false;
++    }
++    // Offline boot mode, or legacy capability mode whose loader did not verify/load BPF.
++    return android::base::GetBoolProperty("ro.note5.offline_boot", false) ||
++           (android::base::GetBoolProperty("ro.note5.legacy_bpf", false) &&
++            !android::base::GetBoolProperty("bpf.note5.legacy_active", false));
+ }
+ 
+ std::vector<std::string> getBasicAccountingCommands() {
+--- a/server/NetdNativeService.cpp
++++ b/server/NetdNativeService.cpp
+@@ -69,9 +69,14 @@
+ // Offline boot mode for kernels without BPF program support. Not for release builds.
+ static bool isOfflineBootTest() {
+     const auto buildType = android::base::GetProperty("ro.build.type", "");
+-    return (buildType == "userdebug" || buildType == "eng") &&
+-           android::base::GetBoolProperty("ro.note5.offline_boot", false) &&
+-           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++    if ((buildType != "userdebug" && buildType != "eng") ||
++        android::base::GetProperty("ro.product.device", "") != "nobleltespr") {
++        return false;
++    }
++    // Offline boot mode, or legacy capability mode whose loader did not verify/load BPF.
++    return android::base::GetBoolProperty("ro.note5.offline_boot", false) ||
++           (android::base::GetBoolProperty("ro.note5.legacy_bpf", false) &&
++            !android::base::GetBoolProperty("bpf.note5.legacy_active", false));
+ }
+ 
+ const char OPT_SHORT[] = "--short";

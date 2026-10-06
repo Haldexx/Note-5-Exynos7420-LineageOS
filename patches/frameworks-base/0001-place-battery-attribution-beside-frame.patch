@@ -1,0 +1,46 @@
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/composable/UnifiedBattery.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/composable/UnifiedBattery.kt
+@@ -345,7 +345,8 @@
+ 
+         var totalWidth: Int = batteryFramePlaceable.width
+         if (attrPlaceable != null) {
+-            totalWidth += (attrPlaceable.width * 0.8).roundToInt()
++            // Same 1dp (scaled) gap as the cap; the attribution never overlaps the frame
++            totalWidth += attrPlaceable.width + scale.roundToInt()
+         } else if (capPlaceable != null) {
+             // 1dp of padding * scale for the cap
+             totalWidth += capPlaceable.width + scale.roundToInt()
+@@ -355,9 +356,9 @@
+             if (layoutDirection == LayoutDirection.Rtl) {
+                 val (offsetX, placeable) =
+                     when {
+-                        // Attr overlaps the battery frame by 20% of its own width
++                        // Attr has 1dp (scaled) of space after it, like the cap
+                         attrPlaceable != null ->
+-                            (attrPlaceable.width * (1 - attrOverlap)).roundToInt() to attrPlaceable
++                            attrPlaceable.width + scale.roundToInt() to attrPlaceable
+ 
+                         // Cap has exactly 1dp (scaled) of space after it
+                         capPlaceable != null ->
+@@ -383,8 +384,7 @@
+                 val (xOffset, placeable) =
+                     when {
+                         attrPlaceable != null ->
+-                            (batteryFramePlaceable.width - (attrOverlap * attrPlaceable.width))
+-                                .roundToInt() to attrPlaceable
++                            (batteryFramePlaceable.width + scale.roundToInt()) to attrPlaceable
+                         capPlaceable != null ->
+                             (batteryFramePlaceable.width + scale.roundToInt()) to capPlaceable
+                         else -> 0 to null
+@@ -411,11 +411,6 @@
+ 
+     private fun Placeable.centerYOffset(outerHeight: Int) =
+         ((outerHeight - height) / 2f).roundToInt()
+-
+-    companion object {
+-        // Overlap the attribution by 20%
+-        private const val attrOverlap = 0.2f
+-    }
+ }
+ 
+ @Composable

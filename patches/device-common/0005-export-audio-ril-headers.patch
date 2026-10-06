@@ -1,0 +1,13 @@
+diff --git a/hardware/audio/Android.mk b/hardware/audio/Android.mk
+index e510043..de8ee7d 100644
+--- a/hardware/audio/Android.mk
++++ b/hardware/audio/Android.mk
+@@ -51,6 +51,8 @@ LOCAL_C_INCLUDES += \
+ 	$(call include-path-for, audio-route) \
+ 	$(call include-path-for, audio-effects)
+ 
++LOCAL_HEADER_LIBRARIES := ril_headers
++
+ LOCAL_CFLAGS := -Werror -Wall
+ LOCAL_CFLAGS += -DPREPROCESSING_ENABLED
+ 

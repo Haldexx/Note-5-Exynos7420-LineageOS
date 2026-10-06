@@ -1,0 +1,62 @@
+Subject: [PATCH] avoid a shared source-root sorting race during file parsing
+
+diff --git a/context.go b/context.go
+index 199171c..97a5b0e 100644
+--- a/context.go
++++ b/context.go
+@@ -211,13 +211,15 @@ func (dirs *SourceRootDirs) Add(names ...string) {
+ }
+ 
+ func (dirs *SourceRootDirs) SourceRootDirAllowed(path string) (bool, string) {
+-	sort.Slice(dirs.dirs, func(i, j int) bool {
+-		return len(dirs.dirs[i]) < len(dirs.dirs[j])
++	// File parsing calls this concurrently; sort only a private copy.
++	sortedDirs := append([]string(nil), dirs.dirs...)
++	sort.Slice(sortedDirs, func(i, j int) bool {
++		return len(sortedDirs[i]) < len(sortedDirs[j])
+ 	})
+-	last := len(dirs.dirs)
+-	for i := range dirs.dirs {
++	last := len(sortedDirs)
++	for i := range sortedDirs {
+ 		// iterate from longest paths (most specific)
+-		prefix := dirs.dirs[last-i-1]
++		prefix := sortedDirs[last-i-1]
+ 		disallowedPrefix := false
+ 		if len(prefix) >= 1 && prefix[0] == '-' {
+ 			prefix = prefix[1:]
+diff --git a/context_test.go b/context_test.go
+index 91b871e..dcd47c7 100644
+--- a/context_test.go
++++ b/context_test.go
+@@ -2423,3 +2423,30 @@ func TestSingletonRestore(t *testing.T) {
+ 		t.Errorf("expected GenerateBuildActions to be not called, got %d", singleton.GenerateBuildActionsCalled)
+ 	}
+ }
++
++// Parsing files in parallel must not reorder the shared source-root list.
++func TestSourceRootDirsConcurrent(t *testing.T) {
++	input := []string{"-hardware/exynos/libdisplaycolor/unittest", "-kernel/platform", "-hardware/exynos/ssp", "-hardware/exynos/libhdr/unittest"}
++	dirs := &SourceRootDirs{}
++	dirs.Add(input...)
++	expected := append([]string(nil), input...)
++	var wg sync.WaitGroup
++	for worker := 0; worker < 16; worker++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for i := 0; i < 100; i++ {
++				if ok, prefix := dirs.SourceRootDirAllowed("hardware/exynos/libhdr-common-headers/Android.bp"); !ok || prefix != "" {
++					t.Errorf("unrelated header excluded by %q", prefix)
++				}
++				if ok, prefix := dirs.SourceRootDirAllowed("hardware/exynos/libhdr/unittest/Android.bp"); ok || prefix != "hardware/exynos/libhdr/unittest" {
++					t.Errorf("test exclusion lost: allowed=%v prefix=%q", ok, prefix)
++				}
++			}
++		}()
++	}
++	wg.Wait()
++	if !reflect.DeepEqual(dirs.dirs, expected) {
++		t.Fatal("source-root matching mutated the shared input")
++	}
++}

@@ -1,0 +1,21 @@
+cc_binary {
+    name: "vendor.lineage.livedisplay-service.nobleltespr",
+    vendor: true,
+    relative_install_path: "hw",
+    init_rc: ["livedisplay.rc"],
+    vintf_fragments: ["livedisplay.xml"],
+    srcs: [
+        "DisplayColorCalibration.cpp",
+        "DisplayModes.cpp",
+        "ReadingEnhancementExynos.cpp",
+        "SunlightEnhancementExynos.cpp",
+        "service.cpp",
+    ],
+    local_include_dirs: ["include"],
+    shared_libs: [
+        "libbase",
+        "libbinder_ndk",
+        "libutils",
+        "vendor.lineage.livedisplay-V1-ndk",
+    ],
+}

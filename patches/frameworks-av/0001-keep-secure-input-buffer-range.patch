@@ -1,0 +1,73 @@
+diff --git a/media/libstagefright/BufferImpl.cpp b/media/libstagefright/BufferImpl.cpp
+index b097324..0d6b636 100644
+--- a/media/libstagefright/BufferImpl.cpp
++++ b/media/libstagefright/BufferImpl.cpp
+@@ -48,17 +48,31 @@ SharedMemoryBuffer::SharedMemoryBuffer(const sp<AMessage> &format, const sp<TMem
+ // SecureBuffer
+ 
+ SecureBuffer::SecureBuffer(const sp<AMessage> &format, const void *ptr, size_t size)
+-    : MediaCodecBuffer(format, new ABuffer(nullptr, size)),
+-      mPointer(ptr) {
++    : SecureBuffer(format, new ABuffer(nullptr, size), ptr, nullptr) {
+ }
+ 
+ SecureBuffer::SecureBuffer(
+         const sp<AMessage> &format, const sp<NativeHandle> &handle, size_t size)
+-    : MediaCodecBuffer(format, new ABuffer(nullptr, size)),
+-      mPointer(nullptr),
++    : SecureBuffer(format, new ABuffer(nullptr, size), nullptr, handle) {
++}
++
++SecureBuffer::SecureBuffer(
++        const sp<AMessage> &format, const sp<ABuffer> &range, const void *ptr,
++        const sp<NativeHandle> &handle)
++    : MediaCodecBuffer(format, range),
++      mRange(range),
++      mPointer(ptr),
+       mHandle(handle) {
+ }
+ 
++status_t SecureBuffer::setRange(size_t offset, size_t size) {
++    if (offset > mRange->capacity() || size > mRange->capacity() - offset) {
++        return BAD_VALUE;
++    }
++    mRange->setRange(offset, size);
++    return OK;
++}
++
+ void *SecureBuffer::getDestinationPointer() {
+     return (void *)(mHandle == nullptr ? mPointer : mHandle->handle());
+ }
+diff --git a/media/libstagefright/include/SecureBuffer.h b/media/libstagefright/include/SecureBuffer.h
+index c45e0e5..08a9e26 100644
+--- a/media/libstagefright/include/SecureBuffer.h
++++ b/media/libstagefright/include/SecureBuffer.h
+@@ -20,6 +20,7 @@
+ 
+ #include <mediadrm/ICrypto.h>
+ #include <media/MediaCodecBuffer.h>
++#include <media/stagefright/foundation/ABuffer.h>
+ 
+ namespace android {
+ 
+@@ -39,12 +40,20 @@ public:
+ 
+     virtual ~SecureBuffer() = default;
+ 
++    // The data is in secure memory, so the ABuffer has no pointer and
++    // ABuffer::setRangeWithStatus() refuses it. Keep the range (for example the
++    // decrypted size set by ACodecBufferChannel) on the ABuffer directly.
++    status_t setRange(size_t offset, size_t size) override;
++
+     void *getDestinationPointer();
+     ICrypto::DestinationType getDestinationType();
+ 
+ private:
+     SecureBuffer() = delete;
++    SecureBuffer(const sp<AMessage> &format, const sp<ABuffer> &range, const void *ptr,
++                 const sp<NativeHandle> &handle);
+ 
++    const sp<ABuffer> mRange;
+     const void *mPointer;
+     const sp<NativeHandle> mHandle;
+ };

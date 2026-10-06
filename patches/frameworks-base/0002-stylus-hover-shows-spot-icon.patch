@@ -1,0 +1,23 @@
+From: Haldexx
+Subject: [PATCH] input: show the hover spot under a hovering stylus
+
+The S Pen's hover reaches apps and PointerChoreographer creates a stylus pointer
+controller, but the default stylus icon is TYPE_NULL, so nothing is drawn unless
+the app under the pen sets an icon. Use TYPE_SPOT_HOVER as the default.
+
+---
+diff --git a/services/core/jni/com_android_server_input_InputManagerService.cpp b/services/core/jni/com_android_server_input_InputManagerService.cpp
+--- a/services/core/jni/com_android_server_input_InputManagerService.cpp
++++ b/services/core/jni/com_android_server_input_InputManagerService.cpp
+@@ -2156,8 +2156,9 @@
+ }
+ 
+ PointerIconStyle NativeInputManager::getDefaultStylusIconId() {
+-    // Use the empty icon as the default pointer icon for a hovering stylus.
+-    return PointerIconStyle::TYPE_NULL;
++    // Show the hover spot under a hovering stylus.
++    // An app that sets its own stylus pointer icon still overrides this default.
++    return PointerIconStyle::TYPE_SPOT_HOVER;
+ }
+ 
+ PointerIconStyle NativeInputManager::getCustomPointerIconId() {

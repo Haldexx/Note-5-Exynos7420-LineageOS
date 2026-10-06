@@ -1,0 +1,13 @@
+diff --git a/base/libhwc1/libvppdisplay/ExynosDisplay.cpp b/base/libhwc1/libvppdisplay/ExynosDisplay.cpp
+index 6a84530..e10c8bb 100644
+--- a/base/libhwc1/libvppdisplay/ExynosDisplay.cpp
++++ b/base/libhwc1/libvppdisplay/ExynosDisplay.cpp
+@@ -2779,7 +2779,7 @@ void ExynosDisplay::determineBandwidthSupport(hwc_display_contents_1_t *contents
+                     directFbNum++;
+                 DISPLAY_LOGD(eDebugResourceAssigning, "layer(%zu) is directFB", i);
+             } else if (can_compose && isOverlaySupported(layer, i,
+-                        !isProcessingRequired(layer) |
++                        !isProcessingRequired(layer) ||
+                         (directFbNum >= mInternalDMAs.size() && !(mUseSecureDMA && isTopLayer)),
+                         &supportedInternalMPP, &supportedExternalMPP)) {
+                 DISPLAY_LOGD(eDebugResourceAssigning, "layer(%zu) is OVERLAY ",i);

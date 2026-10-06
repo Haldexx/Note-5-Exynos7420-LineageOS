@@ -1,0 +1,5 @@
+get_prop({ hal_audio_default hal_camera_default hal_fingerprint_default rild }, default_prop)
+get_prop(rild, system_prop)
+get_prop(audioserver, vendor_default_prop)
+get_prop({ surfaceflinger mediacodec }, vendor_hwc_prop)
+get_prop({ cameraserver appdomain }, vendor_camera_prop)

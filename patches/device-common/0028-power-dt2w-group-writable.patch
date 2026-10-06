@@ -1,0 +1,17 @@
+From: Haldexx
+Subject: [PATCH] power: make the double-tap-to-wake node group-writable
+
+The power HAL runs as root in group system and writes
+/sys/class/dt2w/enabled. With mode 0644 root needs CAP_DAC_OVERRIDE,
+which SELinux enforcing denies.
+
+---
+diff --git a/ramdisk/etc/init.power.rc b/ramdisk/etc/init.power.rc
+--- a/ramdisk/etc/init.power.rc
++++ b/ramdisk/etc/init.power.rc
+@@ -230,4 +230,4 @@
+ 
+     # DT2W
+     chown system system /sys/class/dt2w/enabled
+-    chmod 0644 /sys/class/dt2w/enabled
++    chmod 0664 /sys/class/dt2w/enabled

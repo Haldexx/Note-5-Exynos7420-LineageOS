@@ -1,0 +1,90 @@
+soong_namespace {
+    imports: ["hardware/samsung"],
+}
+
+filegroup {
+    name: "note5_bluetooth_vendor_config",
+    srcs: ["bluetooth/libbt_vndcfg.txt"],
+}
+
+cc_binary {
+    name: "mdm_pwron",
+    vendor: true,
+    srcs: ["modem/mdm_pwron.c"],
+    cflags: ["-Wall", "-Wextra", "-Werror"],
+}
+
+cc_library_shared {
+    name: "libsec-ril-shim",
+    vendor: true,
+    srcs: ["modem/ril-shim/ril_shim.c"],
+    shared_libs: ["liblog", "libdl"],
+    cflags: ["-Wall", "-Wextra", "-Werror"],
+    compile_multilib: "64",
+}
+
+cc_library_shared {
+    name: "libperipheral_client",
+    vendor: true,
+    srcs: ["modem/peripheral-client/pm_client.c"],
+    shared_libs: ["liblog"],
+    cflags: ["-Wall", "-Wextra", "-Werror", "-fvisibility=hidden"],
+    compile_multilib: "64",
+}
+
+android_app {
+    name: "PhhIms",
+    srcs: [
+        "ims/java/**/*.kt",
+        "ims/java/**/*.java",
+    ],
+    manifest: "ims/AndroidManifest.xml",
+    resource_dirs: ["ims/res"],
+    platform_apis: true,
+    certificate: "platform",
+    privileged: true,
+    static_libs: ["kotlinx-coroutines-android"],
+    required: ["privapp-permissions-me.phh.ims.xml"],
+    optimize: {
+        enabled: false,
+    },
+}
+
+prebuilt_etc {
+    name: "privapp-permissions-me.phh.ims.xml",
+    src: "ims/privapp-permissions-me.phh.ims.xml",
+    sub_dir: "permissions",
+}
+
+runtime_resource_overlay {
+    name: "PhhImsTelephonyOverlay",
+    manifest: "ims/overlay-telephony/AndroidManifest.xml",
+    resource_dirs: ["ims/overlay-telephony/res"],
+    sdk_version: "current",
+    product_specific: true,
+}
+
+runtime_resource_overlay {
+    name: "PhhImsFrameworkOverlay",
+    manifest: "ims/overlay-framework/AndroidManifest.xml",
+    resource_dirs: ["ims/overlay-framework/res"],
+    sdk_version: "current",
+    product_specific: true,
+}
+
+cc_binary {
+    name: "sehraw",
+    srcs: [
+        "modem/sehraw/main.cpp",
+        "modem/sehraw/SehRadioResponse.cpp",
+        "modem/sehraw/SehRadioIndication.cpp",
+    ],
+    shared_libs: [
+        "android.hardware.radio@1.0",
+        "libhidlbase",
+        "liblog",
+        "libutils",
+        "vendor.samsung.hardware.radio@2.0",
+    ],
+    cflags: ["-Wall", "-Werror", "-Wno-unused-parameter"],
+}

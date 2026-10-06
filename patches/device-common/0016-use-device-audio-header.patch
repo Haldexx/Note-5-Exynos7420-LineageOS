@@ -1,0 +1,13 @@
+--- a/hardware/audio/Android.mk
++++ b/hardware/audio/Android.mk
+@@ -41,7 +41,10 @@
+ 	libsecril-client
+ 
+ 
++# Device headers (e.g. noblelte samsung_audio.h) must take precedence over the example
++# in $(LOCAL_PATH)/include; Android 16 no longer adds this path globally.
+ LOCAL_C_INCLUDES += \
++	$(TARGET_SPECIFIC_HEADER_PATH) \
+ 	$(LOCAL_PATH)/include \
+ 	external/tinyalsa/include \
+ 	external/tinycompress/include \

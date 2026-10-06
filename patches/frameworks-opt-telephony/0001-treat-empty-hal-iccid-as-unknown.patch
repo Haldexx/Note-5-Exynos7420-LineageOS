@@ -1,0 +1,32 @@
+diff --git a/src/java/com/android/internal/telephony/uicc/UiccPort.java b/src/java/com/android/internal/telephony/uicc/UiccPort.java
+index 3f59582..aa92bb7 100644
+--- a/src/java/com/android/internal/telephony/uicc/UiccPort.java
++++ b/src/java/com/android/internal/telephony/uicc/UiccPort.java
+@@ -22,6 +22,7 @@ import android.os.IBinder;
+ import android.os.Message;
+ import android.os.RemoteException;
+ import android.telephony.SubscriptionInfo;
++import android.text.TextUtils;
+ import android.util.IndentingPrintWriter;
+ 
+ import com.android.internal.annotations.GuardedBy;
+@@ -358,13 +359,14 @@ public class UiccPort {
+      * Return the IccId corresponding to the port.
+      */
+     public String getIccId() {
+-        if (mIccid != null) {
++        // Legacy RILs behind a radio@1.2+ HAL report no ICCID in the card status, which arrives
++        // as "". Then use the ICCID read from the SIM once it is known, and otherwise keep the
++        // HAL value: callers such as SubscriptionManagerService need it non-null.
++        if (!TextUtils.isEmpty(mIccid)) {
+             return mIccid;
+-        } else if (mUiccProfile != null) {
+-            return mUiccProfile.getIccId();
+-        } else {
+-            return null;
+         }
++        String simIccid = (mUiccProfile != null) ? mUiccProfile.getIccId() : null;
++        return (simIccid != null) ? simIccid : mIccid;
+     }
+ 
+     private void log(String msg) {

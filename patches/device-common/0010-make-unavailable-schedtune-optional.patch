@@ -1,0 +1,12 @@
+diff --git a/configs/cgroups.json b/configs/cgroups.json
+index 2166fb8..024fe7c 100644
+--- a/configs/cgroups.json
++++ b/configs/cgroups.json
+@@ -30,6 +30,7 @@
+     },
+     {
+       "Controller": "schedtune",
++      "Optional": true,
+       "Path": "/dev/stune",
+       "Mode": "0755",
+       "UID": "system",

@@ -1,0 +1,1 @@
+allow macloader system_data_root_file:file { getattr open setattr write };

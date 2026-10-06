@@ -1,0 +1,39 @@
+diff --git a/audio_service/service.cpp b/audio_service/service.cpp
+index 1557a95..191a9a5 100644
+--- a/audio_service/service.cpp
++++ b/audio_service/service.cpp
+@@ -17,6 +17,8 @@
+ #define LOG_TAG "audiohalservice"
+ 
+ #include <signal.h>
++#include <sys/prctl.h>
++#include <cstring>
+ #include <string>
+ #include <vector>
+ 
+@@ -75,6 +77,25 @@ static bool registerExternalServiceImplementation(const std::string& libName,
+ int main(int /* argc */, char* /* argv */ []) {
+     signal(SIGPIPE, SIG_IGN);
+ 
++    // The legacy kernel cannot complete crash_dump's ptraced clone handshake.
++    // In offline boot mode, use the linker's existing in-process crash
++    // reporter instead. NO_NEW_PRIVS is inherited by all service threads and
++    // prevents privilege gains; it does not suppress or recover from a crash.
++    char device[PROPERTY_VALUE_MAX];
++    char buildType[PROPERTY_VALUE_MAX];
++    property_get("ro.product.device", device, "");
++    property_get("ro.build.type", buildType, "");
++    if (strcmp(device, "nobleltespr") == 0 &&
++        (strcmp(buildType, "userdebug") == 0 || strcmp(buildType, "eng") == 0) &&
++        property_get_bool("ro.note5.offline_boot", false)) {
++        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0) {
++            ALOGW("OFFLINE NOTE 5 AUDIO DIAGNOSTIC: in-process crash reporting enabled");
++        } else {
++            ALOGE("OFFLINE NOTE 5 AUDIO DIAGNOSTIC: failed to enable in-process crash reporting");
++        }
++    }
++
++
+     if (::android::ProcessState::isVndservicemanagerEnabled()) {
+         ::android::ProcessState::initWithDriver("/dev/vndbinder");
+         ::android::ProcessState::self()->startThreadPool();

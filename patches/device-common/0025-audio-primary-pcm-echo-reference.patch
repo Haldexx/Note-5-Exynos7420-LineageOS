@@ -1,0 +1,132 @@
+--- a/hardware/audio/audio_hw.c
++++ b/hardware/audio/audio_hw.c
+@@ -1238,6 +1238,38 @@
+     return b.delay_ns;
+ }
+ 
++/* Recording threads created after an output patch can have no cached output
++ * device. The legacy preprocessor still needs the real route to choose speaker
++ * versus earpiece tuning. Refresh it when capture starts, including route restarts.
++ */
++static void set_preprocessor_output_device(struct stream_in *in)
++{
++    struct stream_out *out = in->dev->primary_output;
++    uint32_t device;
++    int i, configured = 0;
++    if (out == NULL || out->standby)
++        return;
++    device = out->devices;
++    if (device == AUDIO_DEVICE_NONE)
++        return;
++    for (i = 0; i < in->num_preprocessors; i++) {
++        effect_handle_t effect = in->preprocessors[i].effect_itfe;
++        effect_descriptor_t desc;
++        int reply = 0;
++        uint32_t size = sizeof(reply);
++        if ((*effect)->get_descriptor(effect, &desc) != 0 ||
++            (desc.flags & EFFECT_FLAG_DEVICE_MASK) != EFFECT_FLAG_DEVICE_IND)
++            continue;
++        int status = (*effect)->command(effect, EFFECT_CMD_SET_DEVICE,
++                sizeof(device), &device, &size, &reply);
++        if (status == 0 && reply == 0)
++            configured++;
++        else
++            ALOGW("Voice preprocessor device update failed: %d/%d", status, reply);
++    }
++    ALOGI("Voice preprocessor output device=%#x configured=%d", device, configured);
++}
++
+ static int set_preprocessor_param(effect_handle_t handle,
+                            effect_param_t *param)
+ {
+@@ -1321,6 +1353,18 @@
+     }
+ }
+ 
++/* Only the primary PCM stream owns the playback reference. Android 16
++ * opens it with PRIMARY|DEEP_BUFFER, which is also used for software IMS calls.
++ * Secondary/fast/offload streams must neither feed nor release this reference.
++ */
++static bool is_echo_reference_output(const struct audio_device *adev,
++                                     const struct stream_out *out)
++{
++    return out != NULL && out == adev->primary_output &&
++           (out->usecase == USECASE_AUDIO_PLAYBACK ||
++            out->usecase == USECASE_AUDIO_PLAYBACK_DEEP_BUFFER);
++}
++
+ static void put_echo_reference(struct audio_device *adev,
+                           struct echo_reference_itfe *reference)
+ {
+@@ -1330,11 +1374,11 @@
+ 
+     if (adev->echo_reference != NULL &&
+             reference == adev->echo_reference) {
+-        /* echo reference is taken from the low latency output stream used
++        /* echo reference is taken from the primary PCM output stream used
+          * for voice use cases */
+         adev->echo_reference = NULL;
+         android_atomic_inc(&adev->echo_reference_generation);
+-        if (out != NULL && out->usecase == USECASE_AUDIO_PLAYBACK) {
++        if (is_echo_reference_output(adev, out)) {
+             // if the primary output is in standby or did not pick the echo reference yet
+             // we can safely get rid of it here.
+             // otherwise, out_write() or out_standby() will detect the change in echo reference
+@@ -1355,9 +1399,9 @@
+ {
+     ALOGV("%s: enter:)", __func__);
+     put_echo_reference(adev, adev->echo_reference);
+-    /* echo reference is taken from the low latency output stream used
++    /* echo reference is taken from the primary PCM output stream used
+      * for voice use cases */
+-    if (adev->primary_output!= NULL && adev->primary_output->usecase == USECASE_AUDIO_PLAYBACK &&
++    if (is_echo_reference_output(adev, adev->primary_output) &&
+             !adev->primary_output->standby) {
+         struct audio_stream *stream =
+                 &adev->primary_output->stream.common;
+@@ -1371,6 +1415,8 @@
+                                            wr_channel_count,
+                                            wr_sampling_rate,
+                                            &adev->echo_reference);
++        ALOGI("Voice echo reference: status=%d capture=%uHz/%u playback=%uHz/%u",
++              status, sampling_rate, channel_count, wr_sampling_rate, wr_channel_count);
+         if (status == 0)
+             android_atomic_inc(&adev->echo_reference_generation);
+     }
+@@ -2118,6 +2164,8 @@
+     }
+ 
+ #ifdef PREPROCESSING_ENABLED
++    set_preprocessor_output_device(in);
++
+     if (in->enable_aec && in->echo_reference == NULL) {
+         in->echo_reference = get_echo_reference(adev,
+                                                 AUDIO_FORMAT_PCM_16_BIT,
+@@ -2370,7 +2418,7 @@
+ #ifdef PREPROCESSING_ENABLED
+         out->echo_reference = NULL;
+         out->echo_reference_generation = adev->echo_reference_generation;
+-        if (adev->echo_reference != NULL)
++        if (is_echo_reference_output(adev, out) && adev->echo_reference != NULL)
+             out->echo_reference = adev->echo_reference;
+ #endif
+     } else {
+@@ -2934,7 +2982,8 @@
+         return ret;
+     } else {
+ #ifdef PREPROCESSING_ENABLED
+-        if (android_atomic_acquire_load(&adev->echo_reference_generation)
++        if (is_echo_reference_output(adev, out) &&
++            android_atomic_acquire_load(&adev->echo_reference_generation)
+                 != out->echo_reference_generation) {
+             pthread_mutex_lock(&adev->lock);
+             if (out->echo_reference != NULL) {
+@@ -2958,7 +3007,7 @@
+             pcm_device = node_to_item(node, struct pcm_device, stream_list_node);
+             if (pcm_device->pcm) {
+ #ifdef PREPROCESSING_ENABLED
+-                if (out->echo_reference != NULL && pcm_device->pcm_profile->devices != SND_DEVICE_OUT_SPEAKER) {
++                if (out->echo_reference != NULL) {
+                     struct echo_reference_buffer b;
+                     b.raw = (void *)buffer;
+                     b.frame_count = in_frames;

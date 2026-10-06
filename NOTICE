@@ -1,0 +1,13 @@
+Copyright (C) 2026 Haldexx (https://github.com/Haldexx)
+
+The device configuration and SELinux policy in this repository are licensed under the Apache
+License, Version 2.0 (see LICENSE). Each file under patches/ modifies the named upstream project
+and is distributed under that project's license; patches under patches/kernel/ are GPL-2.0.
+
+device/samsung/nobleltespr/ims is based on the IMS client by phhusson
+(https://github.com/phhusson/ims) and is licensed under GPL-2.0 (see its LICENSE).
+The LiveDisplay and touch HALs come from LineageOS/android_hardware_samsung and keep their
+SPDX notices.
+
+Proprietary vendor files are not part of this repository. The manifest syncs them from
+https://github.com/Haldexx/proprietary_vendor_samsung_noblelte.

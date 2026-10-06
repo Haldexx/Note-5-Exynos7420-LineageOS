@@ -1,0 +1,63 @@
+From: Haldexx
+Subject: [PATCH] memfd: probe sealing on kernels older than 3.17
+
+HasMemfdSupport() refuses every kernel older than 3.17 without trying
+memfd_create() (b/116769556), and Android builds have no fallback: traced
+aborted in PosixSharedMemory::Create() on every trace start (errno 38
+from CreateMemfd()), and producers CHECK HasMemfdSupport() in AttachToFd().
+
+The Note 5's 3.10 kernel has memfd_create and shmem sealing backported
+(kernel 0025 fixes MFD_ALLOW_SEALING). On older kernels, use memfd when a
+probe memfd takes F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL, the seals the
+shared memory buffers need. Kernels from 3.17 are unchanged.
+
+---
+diff --git a/src/tracing/ipc/memfd.cc b/src/tracing/ipc/memfd.cc
+--- a/src/tracing/ipc/memfd.cc
++++ b/src/tracing/ipc/memfd.cc
+@@ -13,6 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
++
++// Before memfd.h, which defines the seal constants itself when the sysroot lacks them.
++#include <fcntl.h>
+ 
+ #include "src/tracing/ipc/memfd.h"
+ 
+@@ -47,10 +50,26 @@
+ #endif  // !defined(__NR_memfd_create)
+ 
+ namespace perfetto {
++namespace {
++// Whether memfd_create() works and its files take the seals Perfetto's shared memory
++// buffers need. Used for kernels older than 3.17 that have memfd backported.
++bool MemfdSealingWorks() {
++  base::ScopedFile fd(static_cast<int>(syscall(
++      __NR_memfd_create, "perfetto_probe", MFD_CLOEXEC | MFD_ALLOW_SEALING)));
++  if (!fd)
++    return false;
++  constexpr int kSeals = F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL;
++  return fcntl(*fd, F_ADD_SEALS, kSeals) == 0 &&
++         (fcntl(*fd, F_GET_SEALS) & kSeals) == kSeals;
++}
++}  // namespace
++
+ bool HasMemfdSupport() {
+   static bool kSupportsMemfd = [] {
+     // Check kernel version supports memfd_create(). Some older kernels segfault
+     // executing memfd_create() rather than returning ENOSYS (b/116769556).
++    // Older kernels may have memfd and sealing backported, so they are
++    // probed instead of refused.
+     static constexpr int kRequiredMajor = 3;
+     static constexpr int kRequiredMinor = 17;
+     struct utsname uts;
+@@ -59,7 +78,7 @@
+         sscanf(uts.release, "%d.%d", &major, &minor) == 2 &&
+         ((major < kRequiredMajor ||
+           (major == kRequiredMajor && minor < kRequiredMinor)))) {
+-      return false;
++      return MemfdSealingWorks();
+     }
+ 
+     base::ScopedFile fd;

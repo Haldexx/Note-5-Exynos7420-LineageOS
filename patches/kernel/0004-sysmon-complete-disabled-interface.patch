@@ -1,0 +1,22 @@
+From: Haldexx
+Subject: [PATCH] sysmon: complete the disabled diagnostic notification interface
+
+ESOC calls sysmon_send_diag_disable_noti even without MSM_SYSMON_COMM.
+The header supplies disabled stubs for the other sysmon operations but
+omits this one, causing a Clang implicit-function-declaration error.
+Match the documented disabled behavior and the adjacent shutdown stub.
+
+diff --git a/include/linux/sysmon.h b/include/linux/sysmon.h
+--- a/include/linux/sysmon.h
++++ b/include/linux/sysmon.h
+@@ -58,6 +58,10 @@ static inline int sysmon_send_shutdown(enum subsys_id dest_ss)
+ {
+ 	return 0;
+ }
++static inline int sysmon_send_diag_disable_noti(enum subsys_id dest_ss)
++{
++	return 0;
++}
+ #endif
+ 
+ #endif

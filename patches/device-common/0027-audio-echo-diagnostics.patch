@@ -1,0 +1,78 @@
+From: Haldexx
+Subject: [PATCH] audio: rate-limited echo cancellation diagnostics
+
+Speakerphone echo diagnostics: log, about every 5 s while capturing, the
+echo reference read (frames requested/available, delay), each preprocessor's process_reverse
+and echo-delay status, each forward process() status, and the playback timestamp and delay
+written into the reference. Used to rule out the reference path before the mic route fix
+(device-common 0026).
+
+---
+diff --git a/hardware/audio/audio_hw.c b/hardware/audio/audio_hw.c
+--- a/hardware/audio/audio_hw.c
++++ b/hardware/audio/audio_hw.c
+@@ -1325,6 +1325,8 @@
+      * in->ref_buf_frames is updated with frames available in in->ref_buf */
+ 
+     int32_t delay_us = update_echo_reference(in, frames)/1000;
++    bool diagnostic = (in->echo_diag_count++ % 256) == 0;
++    if (diagnostic) ALOGI("Echo diagnostic: requested=%zu available=%zu delay_us=%d", frames, in->ref_buf_frames, delay_us);
+     int i;
+     audio_buffer_t buf;
+ 
+@@ -1338,11 +1340,12 @@
+         if ((*in->preprocessors[i].effect_itfe)->process_reverse == NULL)
+             continue;
+         ALOGVV("%s: effect_itfe)->process_reverse() BEGIN i=(%d) ", __func__, i);
+-        (*in->preprocessors[i].effect_itfe)->process_reverse(in->preprocessors[i].effect_itfe,
++        int reverse_status = (*in->preprocessors[i].effect_itfe)->process_reverse(in->preprocessors[i].effect_itfe,
+                                                &buf,
+                                                NULL);
+         ALOGVV("%s: effect_itfe)->process_reverse() END i=(%d) ", __func__, i);
+-        set_preprocessor_echo_delay(in->preprocessors[i].effect_itfe, delay_us);
++        int delay_status = set_preprocessor_echo_delay(in->preprocessors[i].effect_itfe, delay_us);
++        if (diagnostic) ALOGI("Echo diagnostic: effect=%d reverse=%d delay=%d consumed=%zu", i, reverse_status, delay_status, buf.frameCount);
+     }
+ 
+     in->ref_buf_frames -= buf.frameCount;
+@@ -1836,9 +1839,10 @@
+              * input to the next.
+              */
+             for (i = 0; i < in->num_preprocessors; i++) {
+-                (*in->preprocessors[i].effect_itfe)->process(in->preprocessors[i].effect_itfe,
++                int process_status = (*in->preprocessors[i].effect_itfe)->process(in->preprocessors[i].effect_itfe,
+                                                    &in_buf,
+                                                    &out_buf);
++                if ((in->echo_diag_count % 256) == 1) ALOGI("Echo forward: effect=%d status=%d in=%zu out=%zu", i, process_status, in_buf.frameCount, out_buf.frameCount);
+             }
+ 
+             /* process() has updated the number of frames consumed and produced in
+@@ -3014,7 +3018,8 @@
+                     b.raw = (void *)buffer;
+                     b.frame_count = in_frames;
+ 
+-                    get_playback_delay(out, out_frames, &b);
++                    int timing_status = get_playback_delay(out, out_frames, &b);
++                    if ((out->echo_diag_count++ % 512) == 0) ALOGI("Echo playback: status=%d timestamp=%ld.%09ld delay_ns=%d frames=%zu", timing_status, b.time_stamp.tv_sec, b.time_stamp.tv_nsec, b.delay_ns, b.frame_count);
+                     out->echo_reference->write(out->echo_reference, &b);
+                  }
+ #endif
+diff --git a/hardware/audio/audio_hw.h b/hardware/audio/audio_hw.h
+--- a/hardware/audio/audio_hw.h
++++ b/hardware/audio/audio_hw.h
+@@ -290,6 +290,7 @@
+ 
+     bool                         is_fastmixer_affinity_set;
+ 
++    unsigned echo_diag_count;
+     int64_t                      last_write_time_us;
+ };
+ 
+@@ -328,6 +329,7 @@
+     int16_t *ref_buf;
+     size_t ref_buf_size;
+     size_t ref_buf_frames;
++    unsigned echo_diag_count;
+     int num_preprocessors;
+     struct effect_info_s preprocessors[MAX_PREPROCESSORS];
+ 

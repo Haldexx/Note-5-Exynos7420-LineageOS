@@ -1,0 +1,275 @@
+From: Haldexx
+Subject: [PATCH] backport close_range() and pad the AArch32 syscall table
+
+Android 16 bionic's posix_spawn(POSIX_SPAWN_CLOEXEC_DEFAULT) marks every
+descriptor above stderr close-on-exec with close_range(3, ~0U,
+CLOSE_RANGE_CLOEXEC) and _exit(127)s in the child if that fails. This 3.10
+kernel had no close_range, so clatd (IPv4 over IPv6-only mobile data) and
+netd's tethering dnsmasq could never start. Add syscall 436 for AArch64 and
+AArch32 with upstream semantics (CLOSE_RANGE_UNSHARE and CLOSE_RANGE_CLOEXEC).
+
+compat_sys_call_table is a sequential .quad list, but unistd32.h went from
+389 straight to pidfd_open, which therefore sat in slot 390 while
+__NR_compat_syscalls allowed 434: numbers 391..434 read past the end of the
+table. List every slot so each entry lives at its own number.
+
+---
+diff --git a/arch/arm64/include/asm/unistd.h b/arch/arm64/include/asm/unistd.h
+index 74d02c77..0a5e4a61 100644
+--- a/arch/arm64/include/asm/unistd.h
++++ b/arch/arm64/include/asm/unistd.h
+@@ -44,7 +44,7 @@
+ #define __ARM_NR_compat_cacheflush	(__ARM_NR_COMPAT_BASE+2)
+ #define __ARM_NR_compat_set_tls		(__ARM_NR_COMPAT_BASE+5)
+ 
+-#define __NR_compat_syscalls		435
++#define __NR_compat_syscalls		437
+ #endif
+ 
+ #define __ARCH_WANT_SYS_CLONE
+diff --git a/arch/arm64/include/asm/unistd32.h b/arch/arm64/include/asm/unistd32.h
+index 0434d8a9..6fee174b 100644
+--- a/arch/arm64/include/asm/unistd32.h
++++ b/arch/arm64/include/asm/unistd32.h
+@@ -801,8 +801,61 @@ __SYSCALL(387, sys_ni_syscall)
+ __SYSCALL(388, sys_ni_syscall)
+ //#define __NR_membarrier 389
+ __SYSCALL(389, sys_ni_syscall)
++/*
++ * compat_sys_call_table (sys32.S) is a plain .quad list indexed by syscall
++ * number, so every slot up to __NR_compat_syscalls must be listed here.
++ * 390..433 are not implemented on this kernel.
++ */
++__SYSCALL(390, sys_ni_syscall)
++__SYSCALL(391, sys_ni_syscall)
++__SYSCALL(392, sys_ni_syscall)
++__SYSCALL(393, sys_ni_syscall)
++__SYSCALL(394, sys_ni_syscall)
++__SYSCALL(395, sys_ni_syscall)
++__SYSCALL(396, sys_ni_syscall)
++__SYSCALL(397, sys_ni_syscall)
++__SYSCALL(398, sys_ni_syscall)
++__SYSCALL(399, sys_ni_syscall)
++__SYSCALL(400, sys_ni_syscall)
++__SYSCALL(401, sys_ni_syscall)
++__SYSCALL(402, sys_ni_syscall)
++__SYSCALL(403, sys_ni_syscall)
++__SYSCALL(404, sys_ni_syscall)
++__SYSCALL(405, sys_ni_syscall)
++__SYSCALL(406, sys_ni_syscall)
++__SYSCALL(407, sys_ni_syscall)
++__SYSCALL(408, sys_ni_syscall)
++__SYSCALL(409, sys_ni_syscall)
++__SYSCALL(410, sys_ni_syscall)
++__SYSCALL(411, sys_ni_syscall)
++__SYSCALL(412, sys_ni_syscall)
++__SYSCALL(413, sys_ni_syscall)
++__SYSCALL(414, sys_ni_syscall)
++__SYSCALL(415, sys_ni_syscall)
++__SYSCALL(416, sys_ni_syscall)
++__SYSCALL(417, sys_ni_syscall)
++__SYSCALL(418, sys_ni_syscall)
++__SYSCALL(419, sys_ni_syscall)
++__SYSCALL(420, sys_ni_syscall)
++__SYSCALL(421, sys_ni_syscall)
++__SYSCALL(422, sys_ni_syscall)
++__SYSCALL(423, sys_ni_syscall)
++__SYSCALL(424, sys_ni_syscall)
++__SYSCALL(425, sys_ni_syscall)
++__SYSCALL(426, sys_ni_syscall)
++__SYSCALL(427, sys_ni_syscall)
++__SYSCALL(428, sys_ni_syscall)
++__SYSCALL(429, sys_ni_syscall)
++__SYSCALL(430, sys_ni_syscall)
++__SYSCALL(431, sys_ni_syscall)
++__SYSCALL(432, sys_ni_syscall)
++__SYSCALL(433, sys_ni_syscall)
+ #define __NR_pidfd_open 434
+ __SYSCALL(__NR_pidfd_open, sys_pidfd_open)
++//#define __NR_clone3 435
++__SYSCALL(435, sys_ni_syscall)
++#define __NR_close_range 436
++__SYSCALL(__NR_close_range, sys_close_range)
+ 
+ /*
+  * Please add new compat syscalls above this comment and update
+diff --git a/fs/file.c b/fs/file.c
+index c11db1ba..3f9bf8a5 100644
+--- a/fs/file.c
++++ b/fs/file.c
+@@ -18,6 +18,8 @@
+ #include <linux/file.h>
+ #include <linux/fdtable.h>
+ #include <linux/bitops.h>
++#include <linux/bitmap.h>
++#include <linux/close_range.h>
+ #include <linux/interrupt.h>
+ #include <linux/spinlock.h>
+ #include <linux/rcupdate.h>
+@@ -627,6 +629,84 @@ out_unlock:
+ 	return -EBADF;
+ }
+ 
++/*
++ * close_range() backport, semantics as upstream fs/file.c (Linux 5.11).
++ * Android 16 bionic's posix_spawn(POSIX_SPAWN_CLOEXEC_DEFAULT) calls
++ * close_range(3, ~0U, CLOSE_RANGE_CLOEXEC) in the child and exits 127 when it
++ * fails, so without it clatd and the tethering DNS server never start.
++ */
++static void __range_cloexec(struct files_struct *files,
++			    unsigned int fd, unsigned int max_fd)
++{
++	struct fdtable *fdt;
++
++	spin_lock(&files->file_lock);
++	fdt = files_fdtable(files);
++	max_fd = min(max_fd, fdt->max_fds - 1);
++	if (fd <= max_fd)
++		bitmap_set(fdt->close_on_exec, fd, max_fd - fd + 1);
++	spin_unlock(&files->file_lock);
++}
++
++static void __range_close(struct files_struct *files,
++			  unsigned int fd, unsigned int max_fd)
++{
++	struct fdtable *fdt;
++	struct file *file;
++
++	spin_lock(&files->file_lock);
++	/* max_fds never exceeds sysctl_nr_open, so fd cannot wrap. */
++	for (; fd <= max_fd; fd++) {
++		fdt = files_fdtable(files);
++		if (fd >= fdt->max_fds)
++			break;
++		file = fdt->fd[fd];
++		if (file) {
++			rcu_assign_pointer(fdt->fd[fd], NULL);
++			__clear_close_on_exec(fd, fdt);
++			__put_unused_fd(files, fd);
++			spin_unlock(&files->file_lock);
++			filp_close(file, files);
++			cond_resched();
++			spin_lock(&files->file_lock);
++		} else if (need_resched()) {
++			spin_unlock(&files->file_lock);
++			cond_resched();
++			spin_lock(&files->file_lock);
++		}
++	}
++	spin_unlock(&files->file_lock);
++}
++
++int __close_range(unsigned int fd, unsigned int max_fd, unsigned int flags)
++{
++	struct files_struct *files = current->files, *copy = NULL;
++
++	if (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC))
++		return -EINVAL;
++	if (fd > max_fd)
++		return -EINVAL;
++
++	if ((flags & CLOSE_RANGE_UNSHARE) && atomic_read(&files->count) > 1) {
++		int err;
++
++		copy = dup_fd(files, &err);
++		if (!copy)
++			return err;
++		files = copy;
++	}
++
++	if (flags & CLOSE_RANGE_CLOEXEC)
++		__range_cloexec(files, fd, max_fd);
++	else
++		__range_close(files, fd, max_fd);
++
++	/* Install the private table and drop our reference to the shared one. */
++	if (copy)
++		reset_files_struct(copy);
++	return 0;
++}
++
+ void do_close_on_exec(struct files_struct *files)
+ {
+ 	unsigned i;
+diff --git a/fs/open.c b/fs/open.c
+index 0258d82a..0aea0ba4 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -1131,6 +1131,18 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
+ }
+ EXPORT_SYMBOL(sys_close);
+ 
++/**
++ * close_range() - Close or mark close-on-exec every descriptor in a range.
++ * @fd:     first file descriptor to act on
++ * @max_fd: last file descriptor to act on
++ * @flags:  CLOSE_RANGE_UNSHARE and/or CLOSE_RANGE_CLOEXEC
++ */
++SYSCALL_DEFINE3(close_range, unsigned int, fd, unsigned int, max_fd,
++		unsigned int, flags)
++{
++	return __close_range(fd, max_fd, flags);
++}
++
+ /*
+  * This routine simulates a hangup on the tty, to arrange that users
+  * are given clean terminals at login time.
+diff --git a/include/linux/fdtable.h b/include/linux/fdtable.h
+index 085197bd..78720e83 100644
+--- a/include/linux/fdtable.h
++++ b/include/linux/fdtable.h
+@@ -107,6 +107,8 @@ extern void __fd_install(struct files_struct *files,
+ 		      unsigned int fd, struct file *file);
+ extern int __close_fd(struct files_struct *files,
+ 		      unsigned int fd);
++extern int __close_range(unsigned int fd, unsigned int max_fd,
++			 unsigned int flags);
+ 
+ extern struct kmem_cache *files_cachep;
+ 
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 98a5b0c7..a37fc3c9 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -866,6 +866,8 @@ asmlinkage long sys_open_by_handle_at(int mountdirfd,
+ 				      int flags);
+ asmlinkage long sys_setns(int fd, int nstype);
+ asmlinkage long sys_pidfd_open(pid_t pid, unsigned int flags);
++asmlinkage long sys_close_range(unsigned int fd, unsigned int max_fd,
++				unsigned int flags);
+ asmlinkage long sys_process_vm_readv(pid_t pid,
+ 				     const struct iovec __user *lvec,
+ 				     unsigned long liovcnt,
+diff --git a/include/uapi/asm-generic/unistd.h b/include/uapi/asm-generic/unistd.h
+index c5f35e1c..6bec370a 100644
+--- a/include/uapi/asm-generic/unistd.h
++++ b/include/uapi/asm-generic/unistd.h
+@@ -711,9 +711,11 @@ __SYSCALL(__NR_bpf, sys_bpf)
+ __SYSCALL(__NR_pidfd_send_signal, sys_pidfd_send_signal)
+ #define __NR_pidfd_open 434
+ __SYSCALL(__NR_pidfd_open, sys_pidfd_open)
++#define __NR_close_range 436
++__SYSCALL(__NR_close_range, sys_close_range)
+ 
+ #undef __NR_syscalls
+-#define __NR_syscalls 435
++#define __NR_syscalls 437
+ 
+ /*
+  * All syscalls below here should go away really,
+diff --git a/include/uapi/linux/close_range.h b/include/uapi/linux/close_range.h
+new file mode 100644
+index 00000000..284bfb94
+--- /dev/null
++++ b/include/uapi/linux/close_range.h
+@@ -0,0 +1,10 @@
++#ifndef _UAPI_LINUX_CLOSE_RANGE_H
++#define _UAPI_LINUX_CLOSE_RANGE_H
++
++/* Unshare the file descriptor table before closing file descriptors. */
++#define CLOSE_RANGE_UNSHARE	(1U << 1)
++
++/* Set the FD_CLOEXEC bit instead of closing the file descriptor. */
++#define CLOSE_RANGE_CLOEXEC	(1U << 2)
++
++#endif /* _UAPI_LINUX_CLOSE_RANGE_H */

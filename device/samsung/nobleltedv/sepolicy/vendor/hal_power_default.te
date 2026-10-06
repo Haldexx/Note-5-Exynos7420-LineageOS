@@ -1,0 +1,5 @@
+set_prop(hal_power_default, vendor_power_prop)
+allow hal_power_default hal_thermal_service:service_manager find;
+binder_call(hal_power_default, hal_thermal_default)
+allow hal_power_default fwk_stats_service:service_manager find;
+binder_call(servicemanager, hal_power_default)

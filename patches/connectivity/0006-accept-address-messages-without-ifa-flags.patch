@@ -1,0 +1,17 @@
+--- a/staticlibs/device/com/android/net/module/util/netlink/RtNetlinkAddressMessage.java
++++ b/staticlibs/device/com/android/net/module/util/netlink/RtNetlinkAddressMessage.java
+@@ -130,11 +130,11 @@
+ 
+         // The first 8 bits of flags are in the ifaddrmsg.
+         addrMsg.mFlags = addrMsg.mIfaddrmsg.flags;
+-        // IFA_FLAGS. All the flags are in the IF_FLAGS attribute. This should always be present,
+-        // and will overwrite the flags set above.
++        // IFA_FLAGS. All the flags are in the IF_FLAGS attribute, which overwrites the flags set
++        // above. Kernels before 3.14 do not send it; there the ifaddrmsg flags are complete.
+         byteBuffer.position(baseOffset);
+         nlAttr = StructNlAttr.findNextAttrOfType(IFA_FLAGS, byteBuffer);
+-        if (nlAttr == null) return null;
++        if (nlAttr == null) return addrMsg;
+         final Integer value = nlAttr.getValueAsInteger();
+         if (value == null) return null;
+         addrMsg.mFlags = value;

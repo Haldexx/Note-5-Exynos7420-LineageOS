@@ -1,0 +1,12 @@
+diff --git a/sepolicy/vendor/property_contexts b/sepolicy/vendor/property_contexts
+index f2f37a4..eb7354e 100644
+--- a/sepolicy/vendor/property_contexts
++++ b/sepolicy/vendor/property_contexts
+@@ -38,7 +38,6 @@ ro.vendor.debug.omx.             u:object_r:vendor_omx_prop:s0
+ # Radio
+ persist.ril.interfaceconf.       u:object_r:radio_prop:s0
+ persist.radio.multisim.          u:object_r:vendor_radio_prop:s0
+-ro.multisim.                     u:object_r:vendor_radio_prop:s0
+ ril.clatd.                       u:object_r:clatd_radio_prop:s0
+ ril.phone.connected.             u:object_r:vendor_radio_prop:s0
+ vendor.rild.                     u:object_r:vendor_radio_prop:s0

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <unavailable-feature name="android.hardware.wifi.direct" />
+    <unavailable-feature name="android.hardware.wifi.aware" />
+    <unavailable-feature name="android.hardware.wifi.passpoint" />
+    <unavailable-feature name="android.hardware.wifi.rtt" />
+</permissions>

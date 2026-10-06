@@ -1,0 +1,13 @@
+Subject: [PATCH] select the Sprint AIDL LiveDisplay service
+
+--- a/device.mk
++++ b/device.mk
+@@ -25,7 +25,7 @@
+ 
+ # Livedisplay
+ PRODUCT_PACKAGES += \
+-	vendor.lineage.livedisplay@2.1-service.noble
++	vendor.lineage.livedisplay-service.nobleltespr
+ 
+ # Thermal config
+ PRODUCT_COPY_FILES += \

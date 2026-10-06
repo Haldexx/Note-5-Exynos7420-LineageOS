@@ -1,0 +1,21 @@
+Subject: [PATCH] pass an explicit host memory budget to the primary builder
+
+diff --git a/ui/build/soong.go b/ui/build/soong.go
+index c9b303c..5bdea6c 100644
+--- a/ui/build/soong.go
++++ b/ui/build/soong.go
+@@ -226,6 +226,14 @@ func (pb PrimaryBuilderFactory) primaryBuilderInvocation(config Config) bootstra
+ 
+ 	commonArgs = append(commonArgs, "-l", filepath.Join(pb.config.FileListDir(), "Android.bp.list"))
+ 	invocationEnv := make(map[string]string)
++	// The primary builder runs in a clean environment. Allow an explicit host
++	// memory budget without changing dependency validation or product contents.
++	if limit := os.Getenv("SOONG_BUILD_GOMEMLIMIT"); limit != "" {
++		invocationEnv["GOMEMLIMIT"] = limit
++	}
++	if gc := os.Getenv("SOONG_BUILD_GOGC"); gc != "" {
++		invocationEnv["GOGC"] = gc
++	}
+ 	if pb.debugPort != "" {
+ 		//debug mode
+ 		commonArgs = append(commonArgs, "--delve_listen", pb.debugPort,

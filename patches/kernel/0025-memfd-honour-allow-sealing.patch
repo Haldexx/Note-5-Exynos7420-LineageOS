@@ -1,0 +1,25 @@
+From: Haldexx
+Subject: [PATCH] memfd: let MFD_ALLOW_SEALING clear F_SEAL_SEAL
+
+The donor kernel's memfd_create() backport looks up the new file's
+shmem_inode_info but drops the upstream (3.17) line that clears F_SEAL_SEAL
+for MFD_ALLOW_SEALING. shmem_get_inode() starts every inode with
+F_SEAL_SEAL, so every memfd was born sealed against further seals:
+F_GET_SEALS returned F_SEAL_SEAL and F_ADD_SEALS failed with EPERM.
+
+Perfetto needs SHRINK|GROW|SEAL on its shared memory buffers. Measured on
+the SM-N920I with tests/memfd_probe.c (aarch64 and 32-bit compat).
+
+---
+diff --git a/mm/shmem.c b/mm/shmem.c
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -3032,6 +3032,8 @@
+ 	info = SHMEM_I(file->f_path.dentry->d_inode);
+ 	file->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
+ 	file->f_flags |= O_RDWR | O_LARGEFILE;
++	if (flags & MFD_ALLOW_SEALING)
++		info->seals &= ~F_SEAL_SEAL;
+ 
+ 	fd_install(fd, file);
+ 	kfree(name);

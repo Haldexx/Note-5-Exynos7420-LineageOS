@@ -1,0 +1,16 @@
+diff --git a/hardware/audio/audio_hw.c b/hardware/audio/audio_hw.c
+--- a/hardware/audio/audio_hw.c
++++ b/hardware/audio/audio_hw.c
+@@ -3998,7 +3998,11 @@
+         }
+         adev->mode = mode;
+ 
+-        if ((mode == AUDIO_MODE_NORMAL) && adev->voice.in_call) {
++        /* Leave the modem voice call on any mode other than IN_CALL, not only NORMAL: IMS
++         * calls handled on the AP (MODE_IN_COMMUNICATION) pass through IN_CALL while Telecom
++         * sets them up, and the voice session started then kept the earpiece and microphone
++         * on the modem link for the whole call. */
++        if ((mode != AUDIO_MODE_IN_CALL) && adev->voice.in_call) {
+             stop_voice_call(adev);
+         }
+     }

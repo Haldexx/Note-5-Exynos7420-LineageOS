@@ -1,0 +1,80 @@
+--- a/src/com/google/android/iwlan/epdg/EpdgChildSaProposal.java
++++ b/src/com/google/android/iwlan/epdg/EpdgChildSaProposal.java
+@@ -18,6 +18,8 @@
+ 
+ import android.net.ipsec.ike.ChildSaProposal;
+ import android.util.Pair;
++
++import java.util.Set;
+ 
+ public class EpdgChildSaProposal extends EpdgSaProposal {
+     private boolean mAddChildSessionRekeyKePayload = false;
+@@ -75,15 +77,33 @@
+             encrAlgos = (isProposed) ? getEncryptionAlgos() : getSupportedEncryptionAlgos();
+         }
+ 
++        // Iwlan's generic list also serves IKE (userspace crypto). Child SAs
++        // use kernel IPsec, whose supported algorithms differ on older devices.
++        Set<Integer> supportedEncryption = ChildSaProposal.getSupportedEncryptionAlgorithms();
++        int encryptionCount = 0;
+         for (Pair<Integer, Integer> encrAlgo : encrAlgos) {
+-            saProposalBuilder.addEncryptionAlgorithm(encrAlgo.first, encrAlgo.second);
++            if (supportedEncryption.contains(encrAlgo.first)) {
++                saProposalBuilder.addEncryptionAlgorithm(encrAlgo.first, encrAlgo.second);
++                encryptionCount++;
++            }
++        }
++        if (encryptionCount == 0) {
++            throw new IllegalArgumentException("No device-supported Child SA encryption algorithm");
+         }
+ 
+         if (!isAead) {
+             int[] integrityAlgos =
+                     (isProposed) ? getIntegrityAlgos() : getSupportedIntegrityAlgos();
++            Set<Integer> supportedIntegrity = ChildSaProposal.getSupportedIntegrityAlgorithms();
++            int integrityCount = 0;
+             for (int integrityAlgo : integrityAlgos) {
+-                saProposalBuilder.addIntegrityAlgorithm(integrityAlgo);
++                if (supportedIntegrity.contains(integrityAlgo)) {
++                    saProposalBuilder.addIntegrityAlgorithm(integrityAlgo);
++                    integrityCount++;
++                }
++            }
++            if (integrityCount == 0) {
++                throw new IllegalArgumentException("No device-supported Child SA integrity algorithm");
+             }
+         }
+ 
+--- a/src/com/google/android/iwlan/epdg/EpdgTunnelManager.java
++++ b/src/com/google/android/iwlan/epdg/EpdgTunnelManager.java
+@@ -989,6 +989,21 @@
+             return;
+         }
+ 
++        // Validate the device/carrier proposal intersection before allocating
++        // a tunnel interface. A bad configuration must not kill the service or
++        // leak an interface while Android is moving IMS off working LTE.
++        final ChildSessionParams childSessionParams;
++        try {
++            childSessionParams = buildChildSessionParams(setupRequest);
++        } catch (IllegalArgumentException e) {
++            Log.e(TAG, "No usable Child SA proposal for this device");
++            IwlanError iwlanError = new IwlanError(IwlanError.TUNNEL_TRANSFORM_FAILED);
++            reportIwlanError(apnName, iwlanError);
++            tunnelCallback.onClosed(
++                    apnName, iwlanError, new OnClosedMetrics.Builder().setApnName(apnName).build());
++            return;
++        }
++
+         iface = tryCreateIpSecTunnelInterface();
+         if (Objects.isNull(iface)) {
+             IwlanError iwlanError = new IwlanError(IwlanError.TUNNEL_TRANSFORM_FAILED);
+@@ -1004,7 +1019,7 @@
+                         .createIkeSession(
+                                 mContext,
+                                 ikeSessionParams,
+-                                buildChildSessionParams(setupRequest),
++                                childSessionParams,
+                                 Executors.newSingleThreadExecutor(),
+                                 getTmIkeSessionCallback(apnName, token),
+                                 new TmChildSessionCallback(apnName, token));

@@ -1,0 +1,12 @@
+--- a/drivers/gpu/arm/t7xx/r22p0/platform/exynos/gpu_custom_interface.c
++++ b/drivers/gpu/arm/t7xx/r22p0/platform/exynos/gpu_custom_interface.c
+@@ -662,8 +662,7 @@
+ 	int ret, clock = 0;
+ 	struct exynos_context *platform = (struct exynos_context *)pkbdev->platform_context;
+ 	
+-	// Kill it from now without interferring Game Launcher
+-	return count;
++	/* Honor the validated minimum lock; DVFS and thermal maximums stay active. */
+ 
+ 	if (!platform)
+ 		return -ENODEV;

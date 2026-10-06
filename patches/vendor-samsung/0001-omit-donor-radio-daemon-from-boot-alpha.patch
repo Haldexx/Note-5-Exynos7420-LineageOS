@@ -1,0 +1,15 @@
+Subject: [PATCH] omit the donor radio executable and startup rules from boot alpha
+
+--- a/universal7420-common/universal7420-common-vendor.mk
++++ b/universal7420-common/universal7420-common-vendor.mk
+@@ -97,10 +97,7 @@
+     vendor/samsung/universal7420-common/proprietary/vendor/etc/gnss/gps.xml:$(TARGET_COPY_OUT_VENDOR)/etc/gnss/gps.xml \
+     vendor/samsung/universal7420-common/proprietary/vendor/bin/hw/android.hardware.drm@1.1-service.widevine:$(TARGET_COPY_OUT_VENDOR)/bin/hw/android.hardware.drm@1.1-service.widevine \
+     vendor/samsung/universal7420-common/proprietary/vendor/bin/hw/mfgloader:$(TARGET_COPY_OUT_VENDOR)/bin/hw/mfgloader \
+-    vendor/samsung/universal7420-common/proprietary/vendor/bin/hw/rild:$(TARGET_COPY_OUT_VENDOR)/bin/hw/rild \
+     vendor/samsung/universal7420-common/proprietary/vendor/etc/init/android.hardware.drm@1.1-service.widevine.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/android.hardware.drm@1.1-service.widevine.rc \
+-    vendor/samsung/universal7420-common/proprietary/vendor/etc/init/init.vendor.rilchip.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/init.vendor.rilchip.rc \
+-    vendor/samsung/universal7420-common/proprietary/vendor/etc/init/init.vendor.rilcommon.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/init.vendor.rilcommon.rc \
+     vendor/samsung/universal7420-common/proprietary/vendor/etc/mtu-conf.xml:$(TARGET_COPY_OUT_VENDOR)/etc/mtu-conf.xml \
+     vendor/samsung/universal7420-common/proprietary/vendor/etc/nfc/sec_s3fwrn5p_rfreg.bin:$(TARGET_COPY_OUT_VENDOR)/etc/nfc/sec_s3fwrn5p_rfreg.bin \
+     vendor/samsung/universal7420-common/proprietary/vendor/etc/nfc/sec_s3fwrn5s_rfreg.bin:$(TARGET_COPY_OUT_VENDOR)/etc/nfc/sec_s3fwrn5s_rfreg.bin \

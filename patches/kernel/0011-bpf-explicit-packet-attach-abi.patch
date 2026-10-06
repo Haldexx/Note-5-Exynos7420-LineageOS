@@ -1,0 +1,56 @@
+--- a/include/uapi/linux/bpf.h
++++ b/include/uapi/linux/bpf.h
+@@ -205,6 +205,10 @@
+ 		__u32		log_size;	/* size of user buffer */
+ 		__aligned_u64	log_buf;	/* user supplied buffer */
+ 		__u32		kern_version;	/* checked when prog_type=kprobe */
++		__u32		prog_flags;	/* unsupported: must be zero */
++		char		prog_name[16];	/* unsupported: must be zero */
++		__u32		prog_ifindex;	/* no hardware offload */
++		__u32		expected_attach_type;
+ 	};
+ 
+ 	struct { /* anonymous struct used by BPF_OBJ_* commands */
+--- a/kernel/bpf/syscall.c
++++ b/kernel/bpf/syscall.c
+@@ -914,7 +914,28 @@
+ EXPORT_SYMBOL_GPL(bpf_prog_get_type);
+ 
+ /* last field in 'union bpf_attr' used by this command */
+-#define	BPF_PROG_LOAD_LAST_FIELD kern_version
++/* Accept the modern load ABI only for packet hooks we implement.
++ * As in Linux 4.19, CGROUP_SKB uses the same verifier for both directions;
++ * expected_attach_type does not constrain later ingress/egress attachment.
++ * Names, load flags and device offload are deliberately not advertised.
++ */
++static int bpf_prog_load_check_packet_attr(const union bpf_attr *attr)
++{
++	if (attr->prog_flags || attr->prog_ifindex ||
++	    memchr_inv(attr->prog_name, 0, sizeof(attr->prog_name)))
++		return -EINVAL;
++
++	if (attr->prog_type == BPF_PROG_TYPE_CGROUP_SKB) {
++		if (attr->expected_attach_type != BPF_CGROUP_INET_INGRESS &&
++		    attr->expected_attach_type != BPF_CGROUP_INET_EGRESS)
++			return -EINVAL;
++	} else if (attr->expected_attach_type) {
++		return -EINVAL;
++	}
++	return 0;
++}
++
++#define	BPF_PROG_LOAD_LAST_FIELD expected_attach_type
+ 
+ static int bpf_prog_load(union bpf_attr *attr)
+ {
+--- a/kernel/bpf/syscall.c
++++ b/kernel/bpf/syscall.c
+@@ -945,7 +945,7 @@
+ 	char license[128];
+ 	bool is_gpl;
+ 
+-	if (CHECK_ATTR(BPF_PROG_LOAD))
++	if (CHECK_ATTR(BPF_PROG_LOAD) || bpf_prog_load_check_packet_attr(attr))
+ 		return -EINVAL;
+ 
+ 	/* copy eBPF program license from user space */

@@ -1,0 +1,18 @@
+Subject: [PATCH] build static resize2fs for the legacy recovery installer
+
+diff --git a/resize/Android.bp b/resize/Android.bp
+index b7ae2fc..5995d34 100644
+--- a/resize/Android.bp
++++ b/resize/Android.bp
+@@ -70,3 +70,11 @@ cc_binary {
+     defaults: ["resize2fs-defaults"],
+     static_libs: resize2fs_libs,
+ }
++
++// Legacy recovery installers need a self-contained tool outside the system image.
++cc_binary {
++    name: "resize2fs_static",
++    static_executable: true,
++    defaults: ["resize2fs-defaults"],
++    static_libs: resize2fs_libs,
++}

@@ -1,0 +1,38 @@
+diff --git a/tools/releasetools/non_ab_ota.py b/tools/releasetools/non_ab_ota.py
+index 2d1075e..83169a6 100644
+--- a/tools/releasetools/non_ab_ota.py
++++ b/tools/releasetools/non_ab_ota.py
+@@ -149,7 +149,16 @@ def WriteFullOTAPackage(input_zip, output_file):
+       metadata=metadata,
+       info_dict=OPTIONS.info_dict)
+ 
+-  assert HasRecoveryPatch(input_zip, info_dict=OPTIONS.info_dict)
++  preserve_recovery = getattr(device_specific.module, "PRESERVE_RECOVERY", False)
++  if preserve_recovery:
++    if OPTIONS.two_step:
++      raise ValueError("Preserving external recovery is incompatible with two-step OTA")
++    if HasRecoveryPatch(input_zip, info_dict=OPTIONS.info_dict) or any(
++        name.endswith(("/install-recovery.sh", "/recovery-from-boot.p"))
++        for name in input_zip.namelist()):
++      raise ValueError("Recovery-preserving OTA must not contain recovery restoration files")
++  else:
++    assert HasRecoveryPatch(input_zip, info_dict=OPTIONS.info_dict)
+ 
+   # Assertions (e.g. downgrade check, device properties check).
+   #ts = target_info.GetBuildProp("ro.build.date.utc")
+@@ -184,10 +193,11 @@ def WriteFullOTAPackage(input_zip, output_file):
+   #    complete script normally
+   #    (allow recovery to mark itself finished and reboot)
+ 
+-  recovery_img = common.GetBootableImage("recovery.img", "recovery.img",
+-                                         OPTIONS.input_tmp, "RECOVERY")
+-  common.CheckSize(recovery_img.data, "recovery.img", target_info)
+-  common.ZipWriteStr(output_zip, "recovery.img", recovery_img.data)
++  if not preserve_recovery:
++    recovery_img = common.GetBootableImage("recovery.img", "recovery.img",
++                                           OPTIONS.input_tmp, "RECOVERY")
++    common.CheckSize(recovery_img.data, "recovery.img", target_info)
++    common.ZipWriteStr(output_zip, "recovery.img", recovery_img.data)
+   if OPTIONS.two_step:
+     if not target_info.get("multistage_support"):
+       assert False, "two-step packages not supported by this build"

@@ -1,0 +1,2 @@
+get_prop(gpsd, radio_prop)
+wakelock_use(gpsd)

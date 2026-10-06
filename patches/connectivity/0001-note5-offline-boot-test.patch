@@ -1,0 +1,212 @@
+diff --git a/bpf/loader/NetBpfLoad.cpp b/bpf/loader/NetBpfLoad.cpp
+index 2388647..0cf32da 100644
+--- a/bpf/loader/NetBpfLoad.cpp
++++ b/bpf/loader/NetBpfLoad.cpp
+@@ -86,6 +86,15 @@ using std::vector;
+ namespace android {
+ namespace bpf {
+ 
++// Offline boot mode for kernels without BPF program support. Not for release builds.
++static bool isOfflineBootTest() {
++    const auto buildType = android::base::GetProperty("ro.build.type", "");
++    return (buildType == "userdebug" || buildType == "eng") &&
++           android::base::GetBoolProperty("ro.note5.offline_boot", false) &&
++           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++}
++
++
+ // This verifies the macro and the C++ api are in sync, and that they're compile time known.
+ constexpr auto useLibBpf = COM_ANDROID_TETHERING_READONLY_FLAGS_USE_LIBBPF;
+ static_assert(std::is_same<decltype(useLibBpf), const bool>::value, "useLibBpf must be a boolean.");
+@@ -460,7 +469,7 @@ static bool mapMatchesExpectations(const unique_fd& fd,
+     // This is because the primary failure mode we're trying to detect here
+     // is either a source code misconfiguration (which is likely kernel independent)
+     // or a newly introduced kernel feature/bug (which is unlikely to get backported to 4.9).
+-    if (!isAtLeastKernelVersion(4, 14)) return true;
++    if (!isOfflineBootTest() && !isAtLeastKernelVersion(4, 14)) return true;
+ 
+     // Assuming fd is a valid Bpf Map file descriptor then
+     // all the following should always succeed on a 4.14+ kernel.
+@@ -787,6 +796,12 @@ static int pinMap(const borrowed_fd& fd, const struct bpf_map_def& mapDef) {
+ }
+ 
+ static bool isMapTypeSupported(enum bpf_map_type type) {
++    if (isOfflineBootTest()) {
++        // Only map types implemented by the legacy kernel.
++        return type == BPF_MAP_TYPE_HASH || type == BPF_MAP_TYPE_ARRAY ||
++               type == BPF_MAP_TYPE_LPM_TRIE || type == BPF_MAP_TYPE_DEVMAP ||
++               type == BPF_MAP_TYPE_DEVMAP_HASH;
++    }
+     if (type == BPF_MAP_TYPE_LPM_TRIE && !isAtLeastKernelVersion(4, 14)) {
+         // On Linux Kernels older than 4.14 this map type doesn't exist - autoskip.
+         return false;
+@@ -856,14 +871,14 @@ static int createMaps(ElfObject& elfObj, vector<struct bpf_map_def>& md, vector<
+             continue;
+         }
+ 
+-        if (kernelVer < md[i].min_kver) {
++        if (!isOfflineBootTest() && kernelVer < md[i].min_kver) {
+             ALOGD("skipping map %s which requires kernel version 0x%x >= 0x%x",
+                   md[i].name(), kernelVer, md[i].min_kver);
+             mapFds.push_back(unique_fd());
+             continue;
+         }
+ 
+-        if (kernelVer >= md[i].max_kver) {
++        if (!isOfflineBootTest() && kernelVer >= md[i].max_kver) {
+             ALOGD("skipping map %s which requires kernel version 0x%x < 0x%x",
+                   md[i].name(), kernelVer, md[i].max_kver);
+             mapFds.push_back(unique_fd());
+@@ -1348,6 +1363,11 @@ int loadProg(const char* const elfPath) {
+         return ret;
+     }
+ 
++    if (isOfflineBootTest()) {
++        ALOGW("OFFLINE BOOT TEST: created maps only from %s; no programs loaded", elfPath);
++        return 0;
++    }
++
+     for (unsigned i = 0; i < mapFds.size(); i++)
+         ALOGV("map_fd found at %d is %d in %s", i, mapFds[i].get(), elfPath);
+ 
+@@ -1387,7 +1407,7 @@ static bool loadObject(const char* const progPath, const bool useLibbpf = false)
+ #define BPFROOT APEXROOT "/etc/bpf/mainline/"
+ 
+ static bool loadAllObjects() {
+-    bool libbpf = isAtLeast26Q1 || useLibBpf;
++    bool libbpf = !isOfflineBootTest() && (isAtLeast26Q1 || useLibBpf);
+     if (!loadObject(BPFROOT "offload.o")) return false;
+     if (!loadObject(BPFROOT "test.o", libbpf)) return false;
+     if (isAtLeastT) {
+@@ -1568,7 +1588,32 @@ static int libbpfPrint(enum libbpf_print_level lvl, const char *const formatStr,
+     return 0;
+ }
+ 
++static int loadOfflineBootMaps() {
++    ALOGW("OFFLINE NOTE 5 BOOT TEST: networking disabled; initializing userspace maps only");
++    if (getuid() != 0) return 120;
++    for (const char* dir : {"/sys/fs/bpf/tethering", "/sys/fs/bpf/netd_shared",
++                           "/sys/fs/bpf/netd_readonly", "/sys/fs/bpf/net_shared",
++                           "/sys/fs/bpf/net_private", "/sys/fs/bpf/loader"}) {
++        if (!createDir(dir)) return 121;
++    }
++    if (!loadAllObjects()) return 122;
++    unique_fd map(createMap(BPF_MAP_TYPE_ARRAY, sizeof(int), sizeof(int), 2, 0));
++    int one = 1, value = 123;
++    const char* path = "/sys/fs/bpf/tethering/map_kernel_bugs";
++    if (!map.ok() || writeToMapEntry(map, &one, &value, BPF_ANY) ||
++        bpfFdPin(map, path) || chmod(path, 0440) ||
++        chown(path, AID_ROOT, AID_NETWORK_STACK)) return 123;
++    if (!createDir("/sys/fs/bpf/netd_shared/mainline_done")) return 124;
++    // This property is init's startup barrier. In this explicit test mode it means
++    // maps are ready, NOT that any BPF network programs have been loaded.
++    // Do not invoke platform/uprobe loaders: those also need newer kernel features.
++    if (!SetProperty("bpf.progs_loaded", "1")) return 125;
++    ALOGW("OFFLINE NOTE 5 BOOT TEST: maps ready; no BPF programs or networking");
++    return 0;
++}
++
+ static int doLoad(char** argv, char * const envp[]) {
++    if (isOfflineBootTest()) return loadOfflineBootMaps();
+     if (!isAtLeastS) {
+         ALOGE("Impossible - not reachable on Android <S.");
+         // for safety, we don't fail, this is a just-in-case workaround
+diff --git a/bpf/netd/NetdUpdatable.cpp b/bpf/netd/NetdUpdatable.cpp
+index 3b15916..d7ea516 100644
+--- a/bpf/netd/NetdUpdatable.cpp
++++ b/bpf/netd/NetdUpdatable.cpp
+@@ -19,16 +19,30 @@
+ #include "BpfHandler.h"
+ 
+ #include <android-base/logging.h>
++#include <android-base/properties.h>
++#include <errno.h>
+ #include <netdutils/Status.h>
+ 
+ #include "NetdUpdatablePublic.h"
+ 
++// Offline boot mode for kernels without BPF program support. Not for release builds.
++static bool isOfflineBootTest() {
++    const auto buildType = android::base::GetProperty("ro.build.type", "");
++    return (buildType == "userdebug" || buildType == "eng") &&
++           android::base::GetBoolProperty("ro.note5.offline_boot", false) &&
++           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++}
++
+ static android::net::BpfHandler sBpfHandler;
+ 
+ int libnetd_updatable_init(const char* cg2_path) {
+     android::base::InitLogging(/*argv=*/nullptr);
+     LOG(INFO) << __func__ << ": Initializing";
+ 
++    if (isOfflineBootTest()) {
++        LOG(WARNING) << "OFFLINE NOTE 5 BOOT TEST: BPF attachment and socket tagging disabled";
++        return 0;
++    }
+     android::netdutils::Status ret = sBpfHandler.init(cg2_path);
+     if (!android::netdutils::isOk(ret)) {
+         LOG(ERROR) << __func__ << ": Failed: (" << ret.code() << ") " << ret.msg();
+@@ -38,9 +52,11 @@ int libnetd_updatable_init(const char* cg2_path) {
+ }
+ 
+ int libnetd_updatable_tagSocket(int sockFd, uint32_t tag, uid_t chargeUid, uid_t realUid) {
++    if (isOfflineBootTest()) return -ENETDOWN;
+     return sBpfHandler.tagSocket(sockFd, tag, chargeUid, realUid);
+ }
+ 
+ int libnetd_updatable_untagSocket(int sockFd) {
++    if (isOfflineBootTest()) return -ENETDOWN;
+     return sBpfHandler.untagSocket(sockFd);
+ }
+diff --git a/service-t/src/com/android/server/net/NetworkStatsFactory.java b/service-t/src/com/android/server/net/NetworkStatsFactory.java
+index 7d48b71..6d35dc9 100644
+--- a/service-t/src/com/android/server/net/NetworkStatsFactory.java
++++ b/service-t/src/com/android/server/net/NetworkStatsFactory.java
+@@ -218,6 +218,9 @@ public class NetworkStatsFactory {
+      * device boot, and may include details about inactive interfaces.
+      */
+     public NetworkStats readNetworkStatsSummaryXt() throws IOException {
++        if (BpfNetMaps.isOfflineBootTest()) {
++            return new NetworkStats(SystemClock.elapsedRealtime(), 0);
++        }
+         return mDeps.getNetworkStatsDev();
+     }
+ 
+@@ -247,6 +250,9 @@ public class NetworkStatsFactory {
+      */
+     public NetworkStats readNetworkStatsDetail(
+             int limitUid, String[] limitIfaces, int limitTag) throws IOException {
++        if (BpfNetMaps.isOfflineBootTest()) {
++            return new NetworkStats(SystemClock.elapsedRealtime(), 0);
++        }
+         // In order to prevent deadlocks, anything protected by this lock MUST NOT call out to other
+         // code that will acquire other locks within the system server. See b/134244752.
+         synchronized (mPersistentDataLock) {
+diff --git a/service/src/com/android/server/BpfNetMaps.java b/service/src/com/android/server/BpfNetMaps.java
+index a968193..6dbc4c8 100644
+--- a/service/src/com/android/server/BpfNetMaps.java
++++ b/service/src/com/android/server/BpfNetMaps.java
+@@ -104,6 +104,14 @@ import java.util.StringJoiner;
+  * @hide
+  */
+ public class BpfNetMaps {
++    /** Offline boot mode; maps remain real kernel maps. */
++    public static boolean isOfflineBootTest() {
++        final String buildType = android.os.SystemProperties.get("ro.build.type");
++        return ("userdebug".equals(buildType) || "eng".equals(buildType))
++                && android.os.SystemProperties.getBoolean("ro.note5.offline_boot", false)
++                && "nobleltespr".equals(android.os.SystemProperties.get("ro.product.device"));
++    }
++
+     static {
+         if (SdkLevel.isAtLeastT()) {
+             System.loadLibrary("service-connectivity");
+@@ -408,6 +416,8 @@ public class BpfNetMaps {
+          */
+         @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+         public int synchronizeKernelRCU() {
++            // There are no BPF writers in offline boot mode.
++            if (isOfflineBootTest()) return 0;
+             try {
+                 BpfMap.synchronizeKernelRCU();
+             } catch (ErrnoException e) {

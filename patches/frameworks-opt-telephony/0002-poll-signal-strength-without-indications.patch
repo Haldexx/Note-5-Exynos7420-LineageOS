@@ -1,0 +1,97 @@
+From: Haldexx
+Subject: [PATCH] SignalStrengthController: poll while the RIL sends no indications
+
+Android 12+ reads signal strength once at start-up and then relies on the
+RIL's unsolicited indications. Samsung's legacy Shannon libsec-ril on the
+Note 5 (SM-N920I) answers SIGNAL_STRENGTH but never sends the indication,
+and the start-up request ran before the radio was on (RADIO_NOT_AVAILABLE),
+so the status bar showed no bars on a working LTE connection. Restore the
+pre-Android-12 behaviour: poll when the radio turns on and every 20 s
+afterwards until the first indication arrives.
+
+---
+diff --git a/src/java/com/android/internal/telephony/SignalStrengthController.java b/src/java/com/android/internal/telephony/SignalStrengthController.java
+index 52e80dc..2f904e7 100644
+--- a/src/java/com/android/internal/telephony/SignalStrengthController.java
++++ b/src/java/com/android/internal/telephony/SignalStrengthController.java
+@@ -105,6 +105,7 @@ public class SignalStrengthController extends Handler {
+     private static final int EVENT_SIGNAL_STRENGTH_UPDATE                   = 8;
+     public static final int EVENT_POLL_SIGNAL_STRENGTH_DONE                = 9;
+     private static final int EVENT_SERVICE_STATE_CHANGED                    = 10;
++    private static final int EVENT_RADIO_ON                                 = 11;
+ 
+     @NonNull
+     private final Phone mPhone;
+@@ -115,6 +116,13 @@ public class SignalStrengthController extends Handler {
+     @NonNull
+     private SignalStrength mSignalStrength;
+     private long mSignalStrengthUpdatedTime;
++    /**
++     * True once the RIL has sent an unsolicited signal strength indication. Until then the
++     * strength is polled every POLL_PERIOD_MILLIS while the radio is on, as before Android 12:
++     * legacy vendor RILs (for example Samsung's Shannon libsec-ril) answer SIGNAL_STRENGTH
++     * but never send the indication, which left the bars blank after the boot-time poll.
++     */
++    private boolean mDontPollSignalStrength = false;
+     @Nullable
+     private SignalStrength mLastSignalStrength = null;
+ 
+@@ -158,6 +166,7 @@ public class SignalStrengthController extends Handler {
+ 
+         mCi.registerForRilConnected(this, EVENT_RIL_CONNECTED, null);
+         mCi.registerForAvailable(this, EVENT_RADIO_AVAILABLE, null);
++        mCi.registerForOn(this, EVENT_RADIO_ON, null);
+         mCi.setOnSignalStrengthUpdate(this, EVENT_SIGNAL_STRENGTH_UPDATE, null);
+         setSignalStrengthDefaultValues();
+ 
+@@ -265,6 +274,7 @@ public class SignalStrengthController extends Handler {
+                 }
+                 ar = (AsyncResult) msg.obj;
+                 onSignalStrengthResult(ar);
++                queueNextSignalStrengthPoll();
+                 break;
+             }
+ 
+@@ -278,11 +288,20 @@ public class SignalStrengthController extends Handler {
+             case EVENT_SIGNAL_STRENGTH_UPDATE: {
+                 // This is a notification from CommandsInterface.setOnSignalStrengthUpdate
+ 
++                // The RIL reports changes itself; stop polling.
++                mDontPollSignalStrength = true;
++                removeMessages(EVENT_POLL_SIGNAL_STRENGTH);
+                 ar = (AsyncResult) msg.obj;
+                 onSignalStrengthResult(ar);
+                 break;
+             }
+ 
++            case EVENT_RADIO_ON: {
++                // The boot-time poll can run before the radio is on and then never repeats.
++                getSignalStrengthFromCi();
++                break;
++            }
++
+             case EVENT_SERVICE_STATE_CHANGED: {
+                 onServiceStateChanged((ServiceState) ((AsyncResult) msg.obj).result);
+                 break;
+@@ -296,6 +315,8 @@ public class SignalStrengthController extends Handler {
+ 
+     void dispose() {
+         mCi.unSetOnSignalStrengthUpdate(this);
++        mCi.unregisterForOn(this);
++        removeMessages(EVENT_POLL_SIGNAL_STRENGTH);
+     }
+ 
+     /**
+@@ -306,6 +327,12 @@ public class SignalStrengthController extends Handler {
+         setDefaultSignalStrengthReportingCriteria();
+     }
+ 
++    private void queueNextSignalStrengthPoll() {
++        if (mDontPollSignalStrength) return;
++        removeMessages(EVENT_POLL_SIGNAL_STRENGTH);
++        sendMessageDelayed(obtainMessage(EVENT_POLL_SIGNAL_STRENGTH), POLL_PERIOD_MILLIS);
++    }
++
+     void getSignalStrengthFromCi() {
+         mCi.getSignalStrength(obtainMessage(EVENT_GET_SIGNAL_STRENGTH));
+     }

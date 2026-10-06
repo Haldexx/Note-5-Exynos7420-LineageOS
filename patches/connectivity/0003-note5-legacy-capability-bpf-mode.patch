@@ -1,0 +1,306 @@
+--- a/bpf/loader/NetBpfLoad.cpp
++++ b/bpf/loader/NetBpfLoad.cpp
+@@ -94,6 +94,26 @@
+            android::base::GetProperty("ro.product.device", "") == "nobleltespr";
+ }
+ 
++// Legacy capability mode (ro.note5.legacy_bpf product flag). The real kernel
++// version stays reported everywhere; only map/program *selection* uses the 4.9 level,
++// and only after legacyCapabilitiesVerified() passes on the running kernel.
++static bool isLegacyCapabilityMode() {
++    const auto buildType = android::base::GetProperty("ro.build.type", "");
++    return (buildType == "userdebug" || buildType == "eng") &&
++           android::base::GetBoolProperty("ro.note5.legacy_bpf", false) &&
++           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++}
++
++static bool legacyActive = false;
++
++// Any Note 5 test mode: keep the device's backported map checks and map types.
++static bool isNote5TestKernel() { return isOfflineBootTest() || isLegacyCapabilityMode(); }
++
++// Create/pin maps but load no programs.
++static bool isMapsOnlyMode() { return isNote5TestKernel() && !legacyActive; }
++
++static unsigned selectionKernelVer() { return legacyActive ? KVER(4, 9, 0) : kernelVer; }
++
+ 
+ // This verifies the macro and the C++ api are in sync, and that they're compile time known.
+ constexpr auto useLibBpf = COM_ANDROID_TETHERING_READONLY_FLAGS_USE_LIBBPF;
+@@ -469,7 +489,7 @@
+     // This is because the primary failure mode we're trying to detect here
+     // is either a source code misconfiguration (which is likely kernel independent)
+     // or a newly introduced kernel feature/bug (which is unlikely to get backported to 4.9).
+-    if (!isOfflineBootTest() && !isAtLeastKernelVersion(4, 14)) return true;
++    if (!isNote5TestKernel() && !isAtLeastKernelVersion(4, 14)) return true;
+ 
+     // Assuming fd is a valid Bpf Map file descriptor then
+     // all the following should always succeed on a 4.14+ kernel.
+@@ -796,7 +816,7 @@
+ }
+ 
+ static bool isMapTypeSupported(enum bpf_map_type type) {
+-    if (isOfflineBootTest()) {
++    if (isNote5TestKernel()) {
+         // Only map types implemented by the legacy kernel.
+         return type == BPF_MAP_TYPE_HASH || type == BPF_MAP_TYPE_ARRAY ||
+                type == BPF_MAP_TYPE_LPM_TRIE || type == BPF_MAP_TYPE_DEVMAP ||
+@@ -871,16 +891,16 @@
+             continue;
+         }
+ 
+-        if (!isOfflineBootTest() && kernelVer < md[i].min_kver) {
++        if (!isMapsOnlyMode() && selectionKernelVer() < md[i].min_kver) {
+             ALOGD("skipping map %s which requires kernel version 0x%x >= 0x%x",
+-                  md[i].name(), kernelVer, md[i].min_kver);
++                  md[i].name(), selectionKernelVer(), md[i].min_kver);
+             mapFds.push_back(unique_fd());
+             continue;
+         }
+ 
+-        if (!isOfflineBootTest() && kernelVer >= md[i].max_kver) {
++        if (!isMapsOnlyMode() && selectionKernelVer() >= md[i].max_kver) {
+             ALOGD("skipping map %s which requires kernel version 0x%x < 0x%x",
+-                  md[i].name(), kernelVer, md[i].max_kver);
++                  md[i].name(), selectionKernelVer(), md[i].max_kver);
+             mapFds.push_back(unique_fd());
+             continue;
+         }
+@@ -1094,8 +1114,8 @@
+               cs[i].prog_def->min_kver, cs[i].prog_def->max_kver,
+               cs[i].prog_def->bpfloader_min_ver, cs[i].prog_def->bpfloader_max_ver);
+ 
+-        if (kernelVer < cs[i].prog_def->min_kver) continue;
+-        if (kernelVer >= cs[i].prog_def->max_kver) continue;
++        if (selectionKernelVer() < cs[i].prog_def->min_kver) continue;
++        if (selectionKernelVer() >= cs[i].prog_def->max_kver) continue;
+         if (api_level_full < cs[i].prog_def->bpfloader_min_ver) continue;
+         if (api_level_full >= cs[i].prog_def->bpfloader_max_ver) continue;
+ 
+@@ -1363,7 +1383,7 @@
+         return ret;
+     }
+ 
+-    if (isOfflineBootTest()) {
++    if (isMapsOnlyMode()) {
+         ALOGW("OFFLINE BOOT TEST: created maps only from %s; no programs loaded", elfPath);
+         return 0;
+     }
+@@ -1407,7 +1427,7 @@
+ #define BPFROOT APEXROOT "/etc/bpf/mainline/"
+ 
+ static bool loadAllObjects() {
+-    bool libbpf = !isOfflineBootTest() && (isAtLeast26Q1 || useLibBpf);
++    bool libbpf = !isNote5TestKernel() && (isAtLeast26Q1 || useLibBpf);
+     if (!loadObject(BPFROOT "offload.o")) return false;
+     if (!loadObject(BPFROOT "test.o", libbpf)) return false;
+     if (isAtLeastT) {
+@@ -1588,15 +1608,81 @@
+     return 0;
+ }
+ 
++// Proves, on the running kernel, the interfaces the 4.9-level program set needs.
++static bool legacyCapabilitiesVerified() {
++    if (isKernel32Bit()) {
++        ALOGE("NOTE 5 LEGACY BPF: 64-bit kernel required");
++        return false;
++    }
++    const struct {
++        enum bpf_map_type type;
++        uint32_t key_size;
++        uint32_t map_flags;
++    } maps[] = {
++        {BPF_MAP_TYPE_HASH, sizeof(uint32_t), 0},
++        {BPF_MAP_TYPE_ARRAY, sizeof(uint32_t), 0},
++        {BPF_MAP_TYPE_LPM_TRIE, 2 * sizeof(uint32_t), BPF_F_NO_PREALLOC},
++    };
++    for (const auto& m : maps) {
++        unique_fd fd(createMap(m.type, m.key_size, sizeof(uint32_t), 2, m.map_flags));
++        if (!fd.ok()) {
++            ALOGE("NOTE 5 LEGACY BPF: map type %d unavailable [%d:%s]", m.type, errno,
++                  strerror(errno));
++            return false;
++        }
++    }
++    const struct bpf_insn insns[] = {
++        {.code = BPF_ALU64 | BPF_MOV | BPF_K, .dst_reg = BPF_REG_0, .imm = 1},
++        {.code = BPF_JMP | BPF_EXIT},
++    };
++    static const char license[] = "Apache 2.0";
++    const struct {
++        enum bpf_prog_type type;
++        enum bpf_attach_type attach;
++    } progs[] = {
++        {BPF_PROG_TYPE_SOCKET_FILTER, static_cast<enum bpf_attach_type>(0)},
++        {BPF_PROG_TYPE_SCHED_CLS, static_cast<enum bpf_attach_type>(0)},
++        {BPF_PROG_TYPE_SCHED_ACT, static_cast<enum bpf_attach_type>(0)},
++        {BPF_PROG_TYPE_CGROUP_SKB, BPF_CGROUP_INET_INGRESS},
++        {BPF_PROG_TYPE_CGROUP_SKB, BPF_CGROUP_INET_EGRESS},
++    };
++    for (const auto& p : progs) {
++        union bpf_attr req = {
++            .prog_type = p.type,
++            .insn_cnt = 2,
++            .insns = ptr_to_u64(insns),
++            .license = ptr_to_u64(license),
++            .expected_attach_type = p.attach,
++        };
++        unique_fd fd(bpf(BPF_PROG_LOAD, req));
++        if (!fd.ok()) {
++            ALOGE("NOTE 5 LEGACY BPF: program type %d (attach %d) unavailable [%d:%s]", p.type,
++                  p.attach, errno, strerror(errno));
++            return false;
++        }
++    }
++    return true;
++}
++
+ static int loadOfflineBootMaps() {
+-    ALOGW("OFFLINE NOTE 5 BOOT TEST: networking disabled; initializing userspace maps only");
++    if (legacyActive) {
++        ALOGW("NOTE 5 LEGACY BPF: loading 4.9-level programs");
++    } else {
++        ALOGW("OFFLINE NOTE 5 BOOT TEST: networking disabled; initializing userspace maps only");
++    }
+     if (getuid() != 0) return 120;
+     for (const char* dir : {"/sys/fs/bpf/tethering", "/sys/fs/bpf/netd_shared",
+                            "/sys/fs/bpf/netd_readonly", "/sys/fs/bpf/net_shared",
+                            "/sys/fs/bpf/net_private", "/sys/fs/bpf/loader"}) {
+         if (!createDir(dir)) return 121;
+     }
+-    if (!loadAllObjects()) return 122;
++    if (!loadAllObjects()) {
++        if (!legacyActive) return 122;
++        // Never boot-loop on the legacy path: keep the known-working maps-only state.
++        ALOGE("NOTE 5 LEGACY BPF: program load failed; continuing with maps only");
++        legacyActive = false;
++        if (!loadAllObjects()) return 122;
++    }
+     unique_fd map(createMap(BPF_MAP_TYPE_ARRAY, sizeof(int), sizeof(int), 2, 0));
+     int one = 1, value = 123;
+     const char* path = "/sys/fs/bpf/tethering/map_kernel_bugs";
+@@ -1604,16 +1690,26 @@
+         bpfFdPin(map, path) || chmod(path, 0440) ||
+         chown(path, AID_ROOT, AID_NETWORK_STACK)) return 123;
+     if (!createDir("/sys/fs/bpf/netd_shared/mainline_done")) return 124;
++    // netd attaches programs only when this is set (netd starts after this loader).
++    if (legacyActive && !SetProperty("bpf.note5.legacy_active", "1")) return 126;
+     // This property is init's startup barrier. In this explicit test mode it means
+     // maps are ready, NOT that any BPF network programs have been loaded.
+     // Do not invoke platform/uprobe loaders: those also need newer kernel features.
+     if (!SetProperty("bpf.progs_loaded", "1")) return 125;
+-    ALOGW("OFFLINE NOTE 5 BOOT TEST: maps ready; no BPF programs or networking");
++    if (legacyActive) {
++        ALOGW("NOTE 5 LEGACY BPF: 4.9-level programs loaded on kernel 0x%x", kernelVer);
++    } else {
++        ALOGW("OFFLINE NOTE 5 BOOT TEST: maps ready; no BPF programs or networking");
++    }
+     return 0;
+ }
+ 
+ static int doLoad(char** argv, char * const envp[]) {
+-    if (isOfflineBootTest()) return loadOfflineBootMaps();
++    if (isLegacyCapabilityMode()) {
++        legacyActive = legacyCapabilitiesVerified();
++        if (!legacyActive) ALOGE("NOTE 5 LEGACY BPF: capability check failed; maps only");
++    }
++    if (isNote5TestKernel()) return loadOfflineBootMaps();
+     if (!isAtLeastS) {
+         ALOGE("Impossible - not reachable on Android <S.");
+         // for safety, we don't fail, this is a just-in-case workaround
+--- a/bpf/netd/NetdUpdatable.cpp
++++ b/bpf/netd/NetdUpdatable.cpp
+@@ -33,13 +33,20 @@
+            android::base::GetProperty("ro.product.device", "") == "nobleltespr";
+ }
+ 
++// Set by NetBpfLoad (which runs before netd) only after its legacy capability check and
++// all 4.9-level program loads succeeded.
++static bool isLegacyBpfActive() {
++    return android::base::GetBoolProperty("ro.note5.legacy_bpf", false) &&
++           android::base::GetBoolProperty("bpf.note5.legacy_active", false);
++}
++
+ static android::net::BpfHandler sBpfHandler;
+ 
+ int libnetd_updatable_init(const char* cg2_path) {
+     android::base::InitLogging(/*argv=*/nullptr);
+     LOG(INFO) << __func__ << ": Initializing";
+ 
+-    if (isOfflineBootTest()) {
++    if (isOfflineBootTest() && !isLegacyBpfActive()) {
+         LOG(WARNING) << "OFFLINE NOTE 5 BOOT TEST: BPF attachment and socket tagging disabled";
+         return 0;
+     }
+@@ -52,11 +59,11 @@
+ }
+ 
+ int libnetd_updatable_tagSocket(int sockFd, uint32_t tag, uid_t chargeUid, uid_t realUid) {
+-    if (isOfflineBootTest()) return -ENETDOWN;
++    if (isOfflineBootTest() && !isLegacyBpfActive()) return -ENETDOWN;
+     return sBpfHandler.tagSocket(sockFd, tag, chargeUid, realUid);
+ }
+ 
+ int libnetd_updatable_untagSocket(int sockFd) {
+-    if (isOfflineBootTest()) return -ENETDOWN;
++    if (isOfflineBootTest() && !isLegacyBpfActive()) return -ENETDOWN;
+     return sBpfHandler.untagSocket(sockFd);
+ }
+--- a/bpf/netd/BpfHandler.cpp
++++ b/bpf/netd/BpfHandler.cpp
+@@ -21,6 +21,7 @@
+ #include <linux/bpf.h>
+ #include <inttypes.h>
+ 
++#include <android-base/properties.h>
+ #include <android-base/unique_fd.h>
+ #include <bpf/WaitForProgsLoaded.h>
+ #include <log/log.h>
+@@ -75,6 +76,16 @@
+     return netdutils::status::ok;
+ }
+ 
++// Note 5 legacy capability mode: NetBpfLoad verified the backported kernel interfaces and
++// loaded the 4.9-level programs. Attachment choices below still use the real kernel version.
++static bool isNote5LegacyBpfActive() {
++    const auto buildType = android::base::GetProperty("ro.build.type", "");
++    return (buildType == "userdebug" || buildType == "eng") &&
++           android::base::GetProperty("ro.product.device", "") == "nobleltespr" &&
++           android::base::GetBoolProperty("ro.note5.legacy_bpf", false) &&
++           android::base::GetBoolProperty("bpf.note5.legacy_active", false);
++}
++
+ static Status initPrograms(const char* cg2_path) {
+     if (!cg2_path) return Status("cg2_path is NULL");
+ 
+@@ -82,12 +93,13 @@
+     if (!isAtLeastT) return Status("S- platform is unsupported");
+ 
+     // S requires eBPF support which was only added in 4.9, so this should be satisfied.
+-    if (!isAtLeastKernelVersion(4, 9)) {
++    const bool note5Legacy = isNote5LegacyBpfActive();
++    if (!note5Legacy && !isAtLeastKernelVersion(4, 9)) {
+         return Status("kernel version < 4.9.0 is unsupported");
+     }
+ 
+     // U bumps the kernel requirement up to 4.14
+-    if (isAtLeastU && !isAtLeastKernelVersion(4, 14)) {
++    if (!note5Legacy && isAtLeastU && !isAtLeastKernelVersion(4, 14)) {
+         return Status("U+ platform with kernel version < 4.14.0 is unsupported");
+     }
+ 
+@@ -97,12 +109,12 @@
+     }
+ 
+     // V bumps the kernel requirement up to 4.19
+-    if (isAtLeastV && !isAtLeastKernelVersion(4, 19)) {
++    if (!note5Legacy && isAtLeastV && !isAtLeastKernelVersion(4, 19)) {
+         return Status("V+ platform with kernel version < 4.19.0 is unsupported");
+     }
+ 
+     // 25Q2 bumps the kernel requirement up to 5.4
+-    if (isAtLeast25Q2 && !isAtLeastKernelVersion(5, 4)) {
++    if (!note5Legacy && isAtLeast25Q2 && !isAtLeastKernelVersion(5, 4)) {
+         return Status("25Q2+ platform with kernel version < 5.4.0 is unsupported");
+     }
+ 

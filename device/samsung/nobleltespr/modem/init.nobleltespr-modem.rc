@@ -1,0 +1,22 @@
+on post-fs-data
+    mkdir /data/vendor/secradio 0770 radio radio
+    setprop vendor.sec.rild.libpath /vendor/lib64/libsec-ril-shim.so
+
+service ril-daemon /vendor/bin/hw/rild -l /vendor/lib64/libsec-ril-shim.so
+    class main
+    user radio
+    group radio cache inet misc audio sdcard_r sdcard_rw log vpn system readproc wakelock
+    capabilities BLOCK_SUSPEND NET_ADMIN NET_RAW SYS_ADMIN CHOWN SYS_TIME
+    socket sap_uim_socket1 stream 660 bluetooth bluetooth
+    disabled
+
+service nobleltespr-modem /vendor/bin/sh /vendor/bin/init.nobleltespr-modem.sh
+    class late_start
+    user root
+    group root radio system inet net_raw
+    seclabel u:r:su:s0
+    oneshot
+    disabled
+
+on property:sys.boot_completed=1
+    start nobleltespr-modem

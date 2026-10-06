@@ -1,0 +1,19 @@
+From: Haldexx
+Subject: [PATCH] noblelte: allow SELinux enforcing
+
+CONFIG_SECURITY_SELINUX_PERMISSIVE turns every write to
+/sys/fs/selinux/enforce into 0, so init cannot switch to enforcing.
+
+---
+diff --git a/arch/arm64/configs/exynos7420-noblelte_defconfig b/arch/arm64/configs/exynos7420-noblelte_defconfig
+--- a/arch/arm64/configs/exynos7420-noblelte_defconfig
++++ b/arch/arm64/configs/exynos7420-noblelte_defconfig
+@@ -4515,7 +4515,7 @@
+ # CONFIG_SECURITY_SELINUX_BOOTPARAM is not set
+ # CONFIG_SECURITY_SELINUX_DISABLE is not set
+ CONFIG_SECURITY_SELINUX_DEVELOP=y
+-CONFIG_SECURITY_SELINUX_PERMISSIVE=y
++# CONFIG_SECURITY_SELINUX_PERMISSIVE is not set
+ CONFIG_SECURITY_SELINUX_AVC_STATS=y
+ CONFIG_SECURITY_SELINUX_CHECKREQPROT_VALUE=1
+ # CONFIG_SECURITY_SELINUX_POLICYDB_VERSION_MAX is not set

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <bool name="config_device_wfc_ims_available">true</bool>
+    <string name="config_wlan_data_service_package" translatable="false">com.google.android.iwlan</string>
+    <string name="config_wlan_data_service_class" translatable="false">com.google.android.iwlan.IwlanDataService</string>
+    <string name="config_wlan_network_service_package" translatable="false">com.google.android.iwlan</string>
+    <string name="config_wlan_network_service_class" translatable="false">com.google.android.iwlan.IwlanNetworkService</string>
+    <string name="config_qualified_networks_service_package" translatable="false">com.android.telephony.qns</string>
+    <string name="config_qualified_networks_service_class" translatable="false">com.android.telephony.qns.QualifiedNetworksServiceImpl</string>
+</resources>

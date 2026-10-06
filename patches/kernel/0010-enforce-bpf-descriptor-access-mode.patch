@@ -1,0 +1,38 @@
+--- a/kernel/bpf/syscall.c
++++ b/kernel/bpf/syscall.c
+@@ -440,7 +440,7 @@
+ 	if (IS_ERR(map))
+ 		return PTR_ERR(map);
+ 
+-	if (!f.file->f_op->aio_read && !f.file->f_op->read) {
++	if (!(f.file->f_mode & FMODE_READ)) {
+ 		err = -EPERM;
+ 		goto err_put;
+ 	}
+@@ -519,7 +519,7 @@
+ 	if (IS_ERR(map))
+ 		return PTR_ERR(map);
+ 
+-	if (!f.file->f_op->aio_write && !f.file->f_op->write) {
++	if (!(f.file->f_mode & FMODE_WRITE)) {
+ 		err = -EPERM;
+ 		goto err_put;
+ 	}
+@@ -600,7 +600,7 @@
+ 	if (IS_ERR(map))
+ 		return PTR_ERR(map);
+ 
+-	if (!f.file->f_op->aio_write && !f.file->f_op->write) {
++	if (!(f.file->f_mode & FMODE_WRITE)) {
+ 		err = -EPERM;
+ 		goto err_put;
+ 	}
+@@ -650,7 +650,7 @@
+ 	if (IS_ERR(map))
+ 		return PTR_ERR(map);
+ 
+-	if (!f.file->f_op->aio_read && !f.file->f_op->read) {
++	if (!(f.file->f_mode & FMODE_READ)) {
+ 		err = -EPERM;
+ 		goto err_put;
+ 	}

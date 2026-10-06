@@ -1,0 +1,92 @@
+Subject: [PATCH] Note 5 device gates also accept the SM-N920I (nobleltedv)
+
+The legacy-BPF networking and offline fallbacks were confined to ro.product.device
+"nobleltespr". The SM-N920I build (lineage_nobleltedv) runs the same 3.10 kernel and
+must take the same paths; otherwise NetBpfLoad refuses the kernel and init reboots
+(reboot,bpfloader-failed). Only the two Note 5 products are accepted.
+
+diff --git a/bpf/loader/NetBpfLoad.cpp b/bpf/loader/NetBpfLoad.cpp
+--- a/bpf/loader/NetBpfLoad.cpp
++++ b/bpf/loader/NetBpfLoad.cpp
+@@ -91,7 +91,8 @@
+     const auto buildType = android::base::GetProperty("ro.build.type", "");
+     return (buildType == "userdebug" || buildType == "eng") &&
+            android::base::GetBoolProperty("ro.note5.offline_boot", false) &&
+-           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++           (android::base::GetProperty("ro.product.device", "") == "nobleltespr" ||
++            android::base::GetProperty("ro.product.device", "") == "nobleltedv");
+ }
+ 
+ // Legacy capability mode (ro.note5.legacy_bpf product flag). The real kernel
+@@ -101,7 +102,8 @@
+     const auto buildType = android::base::GetProperty("ro.build.type", "");
+     return (buildType == "userdebug" || buildType == "eng") &&
+            android::base::GetBoolProperty("ro.note5.legacy_bpf", false) &&
+-           android::base::GetProperty("ro.product.device", "") == "nobleltespr";
++           (android::base::GetProperty("ro.product.device", "") == "nobleltespr" ||
++            android::base::GetProperty("ro.product.device", "") == "nobleltedv");
+ }
+ 
+ static bool legacyActive = false;
+diff --git a/bpf/netd/BpfHandler.cpp b/bpf/netd/BpfHandler.cpp
+--- a/bpf/netd/BpfHandler.cpp
++++ b/bpf/netd/BpfHandler.cpp
+@@ -81,7 +81,8 @@
+ static bool isNote5LegacyBpfActive() {
+     const auto buildType = android::base::GetProperty("ro.build.type", "");
+     return (buildType == "userdebug" || buildType == "eng") &&
+-           android::base::GetProperty("ro.product.device", "") == "nobleltespr" &&
++           (android::base::GetProperty("ro.product.device", "") == "nobleltespr" ||
++            android::base::GetProperty("ro.product.device", "") == "nobleltedv") &&
+            android::base::GetBoolProperty("ro.note5.legacy_bpf", false) &&
+            android::base::GetBoolProperty("bpf.note5.legacy_active", false);
+ }
+diff --git a/bpf/netd/NetdUpdatable.cpp b/bpf/netd/NetdUpdatable.cpp
+--- a/bpf/netd/NetdUpdatable.cpp
++++ b/bpf/netd/NetdUpdatable.cpp
+@@ -29,7 +29,8 @@
+ static bool isOfflineBootTest() {
+     const auto buildType = android::base::GetProperty("ro.build.type", "");
+     if ((buildType != "userdebug" && buildType != "eng") ||
+-        android::base::GetProperty("ro.product.device", "") != "nobleltespr") {
++        (android::base::GetProperty("ro.product.device", "") != "nobleltespr" &&
++         android::base::GetProperty("ro.product.device", "") != "nobleltedv")) {
+         return false;
+     }
+     // Offline boot mode, or legacy capability mode whose loader did not verify/load BPF.
+diff --git a/service/jni/com_android_server_connectivity_ClatCoordinator.cpp b/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
+--- a/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
++++ b/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
+@@ -55,7 +55,8 @@
+ static bool isOfflineBootTest() {
+     const auto buildType = android::base::GetProperty("ro.build.type", "");
+     if ((buildType != "userdebug" && buildType != "eng") ||
+-        android::base::GetProperty("ro.product.device", "") != "nobleltespr") {
++        (android::base::GetProperty("ro.product.device", "") != "nobleltespr" &&
++         android::base::GetProperty("ro.product.device", "") != "nobleltedv")) {
+         return false;
+     }
+     // Offline boot mode, or legacy capability mode whose loader did not verify/load BPF.
+@@ -68,7 +69,8 @@
+ static bool isNote5LegacyBpfActive() {
+     const auto buildType = android::base::GetProperty("ro.build.type", "");
+     return (buildType == "userdebug" || buildType == "eng") &&
+-           android::base::GetProperty("ro.product.device", "") == "nobleltespr" &&
++           (android::base::GetProperty("ro.product.device", "") == "nobleltespr" ||
++            android::base::GetProperty("ro.product.device", "") == "nobleltedv") &&
+            android::base::GetBoolProperty("ro.note5.legacy_bpf", false) &&
+            android::base::GetBoolProperty("bpf.note5.legacy_active", false);
+ }
+diff --git a/service/src/com/android/server/BpfNetMaps.java b/service/src/com/android/server/BpfNetMaps.java
+--- a/service/src/com/android/server/BpfNetMaps.java
++++ b/service/src/com/android/server/BpfNetMaps.java
+@@ -108,7 +108,8 @@
+     public static boolean isOfflineBootTest() {
+         final String buildType = android.os.SystemProperties.get("ro.build.type");
+         if (!("userdebug".equals(buildType) || "eng".equals(buildType))
+-                || !"nobleltespr".equals(android.os.SystemProperties.get("ro.product.device"))) {
++                || !java.util.Set.of("nobleltespr", "nobleltedv")
++                           .contains(android.os.SystemProperties.get("ro.product.device"))) {
+             return false;
+         }
+         // Offline boot mode, or legacy capability mode whose loader did not load BPF.
