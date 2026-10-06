@@ -45,6 +45,8 @@ See [BUILDING.md](BUILDING.md).
 - [LineageOS](https://lineageos.org) and the Android Open Source Project
 - [samsungexynos7420](https://github.com/samsungexynos7420) for the Exynos 7420 device, kernel
   and vendor trees this port builds on
+- [@fakemanoan](https://github.com/fakemanoan) for the HUGE amount of work he has put into this
+  platform
 - [phhusson](https://github.com/phhusson) for the IMS client
 - Haldexx: Android 16 port, patches and maintenance
 
