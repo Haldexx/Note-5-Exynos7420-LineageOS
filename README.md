@@ -29,8 +29,6 @@ stack, but are not yet tested. VoLTE and Wi-Fi calling depend on carrier support
 
 ## Status
 
-See [FEATURES.md](FEATURES.md) for what works, what does not, and what is untested.
-
 Highlights: SELinux enforcing, VoLTE and Wi-Fi calling, RCS, S Pen with hover pointer, native
 1440x2560, OpenGL ES 3.2 and Vulkan, tuned touch and app-launch performance.
 
