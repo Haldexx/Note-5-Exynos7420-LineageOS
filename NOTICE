@@ -3,6 +3,8 @@ Copyright (C) 2026 Haldexx (https://github.com/Haldexx)
 The device configuration and SELinux policy in this repository are licensed under the Apache
 License, Version 2.0 (see LICENSE). Each file under patches/ modifies the named upstream project
 and is distributed under that project's license; patches under patches/kernel/ are GPL-2.0.
+The complete kernel source of each release is published at
+https://github.com/Haldexx/android_kernel_samsung_universal7420
 
 device/samsung/nobleltespr/ims is based on the IMS client by phhusson
 (https://github.com/phhusson/ims) and is licensed under GPL-2.0 (see its LICENSE).

@@ -40,6 +40,9 @@ See [INSTALL.md](INSTALL.md).
 
 See [BUILDING.md](BUILDING.md).
 
+Kernel source: [Haldexx/android_kernel_samsung_universal7420](https://github.com/Haldexx/android_kernel_samsung_universal7420/tree/noblelte-v1.0)
+(tag `noblelte-v1.0`, branch `lineage-23.2`).
+
 ## Credits
 
 - [LineageOS](https://lineageos.org) and the Android Open Source Project

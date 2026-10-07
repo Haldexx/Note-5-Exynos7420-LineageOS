@@ -20,6 +20,10 @@ stock vendor files from
 [proprietary_vendor_samsung_noblelte](https://github.com/Haldexx/proprietary_vendor_samsung_noblelte)
 at `device/samsung/nobleltespr/proprietary`.
 
+The kernel is synced at its upstream revision and patched in step 2. The same kernel with the
+patches applied as commits is published at [android_kernel_samsung_universal7420](https://github.com/Haldexx/android_kernel_samsung_universal7420/tree/noblelte-v1.0)
+(tag `noblelte-v1.0`).
+
 ## 2. Apply the patches
 
 ```bash
