@@ -1,0 +1,35 @@
+From: Haldexx
+Subject: [PATCH] taskbar: do not render the forced navbar as a taskbar on handhelds
+
+When the user forces the navigation bar on a phone (LineageSettings
+FORCE_SHOW_NAVBAR), isTaskbarEnabled() is true but isLargeScreenTaskbar
+(DeviceProfile.isTaskbarPresent) is false, and recreateTaskbarForDisplay fell
+through to create a taskbar anyway. Its Back/Home/Recents dispatch through the
+SystemUiProxy, which does not deliver them here, so the buttons do nothing;
+and with SystemUI now drawing its own NavigationBar for phones the two windows
+collided (BadTokenException, launcher crash loop). Return early on handhelds so
+Launcher creates no taskbar and SystemUI owns the functional navigation bar.
+
+---
+ quickstep/src/com/android/launcher3/taskbar/TaskbarManagerImpl.java | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/quickstep/src/com/android/launcher3/taskbar/TaskbarManagerImpl.java b/quickstep/src/com/android/launcher3/taskbar/TaskbarManagerImpl.java
+--- a/quickstep/src/com/android/launcher3/taskbar/TaskbarManagerImpl.java
++++ b/quickstep/src/com/android/launcher3/taskbar/TaskbarManagerImpl.java
+@@ -838,7 +838,11 @@
+                 SystemUiProxy systemUiProxy = SystemUiProxy.INSTANCE.get(mBaseContext);
+                 systemUiProxy.notifyTaskbarStatus(/* visible */ false, /* stashed */ false);
+                 systemUiProxy.setHasBubbleBar(false);
+-                if (!isTaskbarEnabled || !displayExists) {
++                // noblelte: a handheld (isLargeScreenTaskbar == false) must not render the
++                // forced navigation bar as a taskbar; SystemUI draws its own functional
++                // 3-button NavigationBar instead. Returning here avoids creating a taskbar
++                // window that would both be non-functional and collide with that bar.
++                if (!isTaskbarEnabled || !displayExists || !isLargeScreenTaskbar) {
+                     debugTaskbarManager(
+                             "recreateTaskbarForDisplay: exiting bc (!isTaskbarEnabled || "
+                                     + "!displayExists)",
+-- 
+2.43.0
+

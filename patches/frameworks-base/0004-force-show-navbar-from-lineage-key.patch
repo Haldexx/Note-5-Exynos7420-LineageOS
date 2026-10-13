@@ -1,0 +1,75 @@
+From: Haldexx
+Subject: [PATCH] wm: force the navigation bar from the LineageOS buttons key
+
+On a device with hardware keys and no config_showNavigationBar overlay (all
+noblelte variants), enabling Settings > System > Buttons > navigation bar
+disabled the hardware keys but no on-screen bar appeared. Two breaks:
+  1. The toggle writes LineageSettings.System.FORCE_SHOW_NAVBAR, but the
+     framework observer only watches Settings.Secure.NAV_BAR_FORCE_VISIBLE,
+     so mForceShowNavigationBarEnabled stayed false.
+  2. hasNavigationBar() returned only the resource-based mHasNavigationBar
+     (false here), so even with the flag set SystemUI never created the bar
+     (verified live: Secure key=1 flips the flag but 0 navbar windows).
+Read the LineageOS key in DisplayPolicy (services/core already links
+lineage-sdk) and OR the force flag into hasNavigationBar(). Applied at boot;
+the setting persists, so reboot after toggling.
+
+---
+ services/core/java/com/android/server/wm/DisplayPolicy.java | 21 ++++++
+ 1 file changed
+
+diff --git a/services/core/java/com/android/server/wm/DisplayPolicy.java b/services/core/java/com/android/server/wm/DisplayPolicy.java
+--- a/services/core/java/com/android/server/wm/DisplayPolicy.java
++++ b/services/core/java/com/android/server/wm/DisplayPolicy.java
+@@ -133,6 +133,7 @@
+ import com.android.internal.annotations.VisibleForTesting;
+ import com.android.internal.os.BackgroundThread;
+ import com.android.internal.policy.ForceShowNavBarSettingsObserver;
++import lineageos.providers.LineageSettings;
+ import com.android.internal.policy.GestureNavigationSettingsObserver;
+ import com.android.internal.protolog.ProtoLog;
+ import com.android.internal.statusbar.LetterboxDetails;
+@@ -711,18 +712,28 @@
+         mForceShowNavBarSettingsObserver = new ForceShowNavBarSettingsObserver(
+                 mHandler, mContext);
+         mForceShowNavBarSettingsObserver.setOnChangeRunnable(this::updateForceShowNavBarSettings);
+-        mForceShowNavigationBarEnabled = mForceShowNavBarSettingsObserver.isEnabled();
++        mForceShowNavigationBarEnabled = isForceShowNavBarSettingEnabled();
+         mHandler.post(mForceShowNavBarSettingsObserver::register);
+     }
+ 
+     private void updateForceShowNavBarSettings() {
+         synchronized (mLock) {
+-            mForceShowNavigationBarEnabled =
+-                    mForceShowNavBarSettingsObserver.isEnabled();
++            mForceShowNavigationBarEnabled = isForceShowNavBarSettingEnabled();
+             updateSystemBarAttributes();
+         }
+     }
+ 
++    // The LineageOS buttons setting (Settings > System > Buttons) writes
++    // LineageSettings.System.FORCE_SHOW_NAVBAR, while the AOSP observer only watches
++    // Settings.Secure.NAV_BAR_FORCE_VISIBLE. Honour both so the on-screen navigation bar
++    // appears on hardware-key devices that have no config_showNavigationBar overlay.
++    private boolean isForceShowNavBarSettingEnabled() {
++        return mForceShowNavBarSettingsObserver.isEnabled()
++                || LineageSettings.System.getIntForUser(mContext.getContentResolver(),
++                        LineageSettings.System.FORCE_SHOW_NAVBAR, 0, UserHandle.USER_CURRENT)
++                        == 1;
++    }
++
+     void systemReady() {
+         if (!CLIENT_TRANSIENT) {
+             mSystemGestures.systemReady();
+@@ -780,7 +791,7 @@
+     }
+ 
+     public boolean hasNavigationBar() {
+-        return mHasNavigationBar;
++        return mHasNavigationBar || mForceShowNavigationBarEnabled;
+     }
+ 
+     void updateHasNavigationBarIfNeeded() {
+-- 
+2.43.0
+

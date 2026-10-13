@@ -1,0 +1,81 @@
+diff --git a/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt b/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
+--- a/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
++++ b/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
+@@ -7,6 +7,12 @@
+ 
+ import android.Manifest
+ import android.content.Context
++import android.hardware.camera2.CameraDevice
++import android.util.Log
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.flow.update
++import kotlinx.coroutines.withTimeoutOrNull
+ import android.os.Handler
+ import android.os.Looper
+ import androidx.camera.camera2.Camera2Config
+@@ -43,7 +49,29 @@
+ ) {
+     // Keep an owned backend so a graph close can also close the physical device.
+     // The default backend may reuse a device across sensor-speed changes.
+-    private val cameraPipe = CameraPipe.create(CameraPipe.Config(appContext = context.applicationContext))
++    private val physicalDevices = MutableStateFlow<Set<CameraDevice>>(emptySet())
++    private val physicalCameraCallback = object : CameraDevice.StateCallback() {
++        override fun onOpened(camera: CameraDevice) {
++            physicalDevices.update { it + camera }
++            Log.i("AperturePhysicalCamera", "Opened physical camera ${camera.id}")
++        }
++        override fun onClosed(camera: CameraDevice) {
++            physicalDevices.update { it - camera }
++            Log.i("AperturePhysicalCamera", "Closed physical camera ${camera.id}")
++        }
++        override fun onDisconnected(camera: CameraDevice) {
++            Log.w("AperturePhysicalCamera", "Disconnected camera ${camera.id}; awaiting close")
++        }
++        override fun onError(camera: CameraDevice, error: Int) {
++            Log.w("AperturePhysicalCamera", "Camera ${camera.id} error $error; awaiting close")
++        }
++    }
++    private val cameraPipe = CameraPipe.create(CameraPipe.Config(
++        appContext = context.applicationContext,
++        cameraInteropConfig = CameraPipe.CameraInteropConfig(
++            cameraDeviceStateCallback = physicalCameraCallback,
++        ),
++    ))
+ 
+     init {
+         ProcessCameraProvider.configureInstance(Camera2Config.from(
+@@ -53,8 +81,16 @@
+         ))
+     }
+ 
+-    suspend fun closePhysicalCameras() {
+-        cameraPipe.cameras().disconnectAllAsync().await()
++    suspend fun closePhysicalCameras(): Boolean {
++        // Disconnect completion only queues/closes virtual devices. The HAL may still
++        // be draining buffers; opening again before onClosed triggers open timeouts.
++        val closed = withTimeoutOrNull(30_000L) {
++            cameraPipe.cameras().disconnectAllAsync().await()
++            physicalDevices.first { it.isEmpty() }
++            true
++        } ?: false
++        if (!closed) Log.e("AperturePhysicalCamera", "Physical camera close timed out; rebind stopped")
++        return closed
+     }
+ 
+     /**
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -1549,8 +1549,9 @@
+                 return
+             }
+         }
+-        if (previousCameraInfo != null) {
+-            viewModel.closePhysicalCameras()
++        if (previousCameraInfo != null && !viewModel.closePhysicalCameras()) {
++            Log.e(LOG_TAG, "Physical camera is still closing; not opening a conflicting session")
++            return
+         }
+         closingCameraInfo = null
+ 

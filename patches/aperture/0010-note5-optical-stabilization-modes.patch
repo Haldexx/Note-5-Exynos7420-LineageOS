@@ -1,0 +1,30 @@
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -1705,6 +1705,9 @@
+         viewModel.cameraController.cameraSelector = cameraSelector
+         viewModel.cameraController.setEnabledUseCases(cameraUseCases)
+ 
++        val note5Rear = android.os.Build.HARDWARE == "samsungexynos7420" &&
++            cameraConfiguration.camera.cameraId == "0"
++
+         // Bind camera controller to lifecycle
+         viewModel.cameraController.bindToLifecycle(this)
+ 
+@@ -1746,6 +1749,16 @@
+             .setDistortionCorrectionMode(camera2Options.distortionCorrectionMode)
+             .setHotPixelMode(camera2Options.hotPixelMode)
+             .apply {
++                // Request OIS explicitly: Samsung's RECORD template defaults to OFF.
++                // Its vendor operation mode selects firmware still=100 / video=102.
++                if (note5Rear) {
++                    setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
++                        CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
++                    setCaptureRequestOption(CaptureRequest.Key<Int>(
++                        "samsung.android.lens.opticalStabilizationOperationMode",
++                        Int::class.javaObjectType),
++                        if (cameraConfiguration is CameraConfiguration.Video) 1 else 0)
++                }
+                 if (cameraConfiguration.camera.supportsSamsungLiveHdr) {
+                     setCaptureRequestOption(
+                         liveHdrKey,

@@ -219,6 +219,8 @@ class SipHandler(
     private var reliableSequenceCounter = 67
 
     private val cbLock = ReentrantLock()
+    private val requestReplyWriter = ThreadLocal<OutputStream>()
+    private val signallingClients = java.util.concurrent.CopyOnWriteArrayList<Socket>()
     private var requestCallbacks: Map<SipMethod, ((SipRequest) -> Int)> = mapOf()
     private var responseCallbacks: Map<String, ((SipResponse) -> Boolean)> = mapOf()
     private var imsReady = false
@@ -231,6 +233,7 @@ class SipHandler(
     var onSmsStatusReportReceived: ((Int, String, ByteArray) -> Unit)? = null
     var onIncomingCall: ((handle: Object, from: String, extras: Map<String, String>) -> Unit)? =
         null
+    var onIncomingCallAccepted: ((String) -> Unit)? = null
     var onOutgoingCallConnected: ((handle: Object, extras: Map<String, String>) -> Unit)? =
         null
     var onOutgoingCallFailed: ((Int, String) -> Unit)? = null
@@ -274,16 +277,32 @@ class SipHandler(
             return handleResponse(msg)
         }
         if (msg !is SipRequest) {
+            val first = msg?.firstLine?.trim()?.split(Regex("\\s+"))
+            if (msg != null && first?.size == 3 && first.last() == "SIP/2.0") {
+                val reply = SipResponse(405, "Method Not Allowed",
+                    msg.headers.filterKeys { it in listOf("via", "from", "to", "call-id", "cseq") } +
+                        ("allow" to listOf("INVITE, ACK, CANCEL, BYE, UPDATE, NOTIFY, MESSAGE, PRACK, OPTIONS")))
+                synchronized(writer) { writer.write(reply.toByteArray()) }
+                return true // Unsupported INFO/REFER must not disconnect the IMS transport.
+            }
             Rlog.d(TAG, "Got invalid message! Closing socket (except main)")
             return false
         }
 
         val requestCb = cbLock.withLock { requestCallbacks[msg.method] }
-        var status = 200
+        var status = if (msg.method in listOf(SipMethod.OPTIONS, SipMethod.NOTIFY)) 200 else 405
         if (requestCb != null) {
-            status = requestCb(msg)
+            requestReplyWriter.set(writer)
+            status = try { requestCb(msg) } catch (e: Exception) {
+                Rlog.w(TAG, "Invalid ${msg.method} request", e)
+                if (msg.method == SipMethod.INVITE) {
+                    incomingDialog?.takeIf { it.callId == msg.headers["call-id"]?.firstOrNull() && !it.answered }
+                        ?.let { failIncoming(it, "Invalid incoming offer", sendResponse = false) }
+                }
+                488
+            } finally { requestReplyWriter.remove() }
         }
-        if (status == 0) return true
+        if (status == 0 || msg.method == SipMethod.ACK) return true
         val reply =
             SipResponse(
                 statusCode = status,
@@ -292,13 +311,16 @@ class SipHandler(
                         "OK"
                     } else if (status == 100) {
                         "Trying"
+                    } else if (status == 405) {
+                        "Method Not Allowed"
                     } else {
                         "ERROR"
                     },
                 headersParam =
                     msg.headers.filter { (k, _) ->
                         k in listOf("cseq", "via", "from", "to", "call-id")
-                    },
+                    } + if (status == 405) mapOf("allow" to listOf(
+                        "INVITE, ACK, CANCEL, BYE, UPDATE, NOTIFY, MESSAGE, PRACK, OPTIONS")) else emptyMap(),
             )
         Rlog.d(TAG, "Replying back with $reply")
         synchronized(writer) { writer.write(reply.toByteArray()) }
@@ -360,6 +382,8 @@ class SipHandler(
     }
 
     private fun closeSignalling() {
+        signallingClients.forEach { runCatching { it.close() } }
+        signallingClients.clear()
         if (this::plainSocket.isInitialized) runCatching { plainSocket.close() }
         if (this::socket.isInitialized) runCatching { socket.close() }
         if (this::serverSocket.isInitialized) runCatching { serverSocket.close() }
@@ -369,6 +393,19 @@ class SipHandler(
             runCatching { ipsecSettings.clientSpiS.close() }
             runCatching { ipsecSettings.serverSpiC?.close() }
             runCatching { ipsecSettings.serverSpiS?.close() }
+        }
+    }
+
+    private fun serveIncomingTcpClient(client: Socket, generation: Int) {
+        try {
+            val reader = client.getInputStream().sipReader()
+            val writer = client.getOutputStream()
+            while (registrationGeneration.get() == generation && parseMessage(reader, writer)) { }
+        } catch (e: Exception) {
+            Rlog.d(TAG, "Incoming TCP connection ended: ${e.javaClass.simpleName}")
+        } finally {
+            signallingClients.remove(client)
+            runCatching { client.close() }
         }
     }
 
@@ -624,6 +661,7 @@ class SipHandler(
         setRequestCallback(SipMethod.MESSAGE, ::handleSms)
         setRequestCallback(SipMethod.INVITE, ::handleCall)
         setRequestCallback(SipMethod.PRACK, ::handlePrack)
+        setRequestCallback(SipMethod.ACK, ::handleAck)
         setRequestCallback(SipMethod.CANCEL, ::handleCancel)
         setRequestCallback(SipMethod.BYE, ::handleCancel)
         setRequestCallback(SipMethod.UPDATE, ::handleUpdate)
@@ -648,10 +686,10 @@ class SipHandler(
             try {
                 while (true) {
                     val client = establishedServerSocket.serverSocket.accept()
-                    val reader = client.getInputStream().sipReader()
-                    val writer = client.getOutputStream()
-                    while (parseMessage(reader, writer)) { }
-                    client.close()
+                    signallingClients.add(client)
+                    CoroutineScope(Dispatchers.IO).launch {
+                        serveIncomingTcpClient(client, establishedGeneration)
+                    }
                 }
             } catch (t: Throwable) {
                 Rlog.d(TAG, "Got exception in TCP server socket", t)
@@ -661,18 +699,15 @@ class SipHandler(
             try {
                 val bufferIn = ByteArray(128 * 1024)
                 val dgramPacketIn = DatagramPacket(bufferIn, bufferIn.size)
-                val writer = ByteArrayOutputStream()
                 while (true) {
                     dgramPacketIn.length = bufferIn.size
                     establishedUdpServer.socket.receive(dgramPacketIn)
                     Rlog.d(TAG, "Received dgram packet")
                     val baIs = ByteArrayInputStream(dgramPacketIn.data, dgramPacketIn.offset, dgramPacketIn.length)
                     val reader = baIs.sipReader()
+                    val writer = SipDatagramReplyWriter(establishedUdpServer.socket,
+                        dgramPacketIn.address, dgramPacketIn.port)
                     while (parseMessage(reader, writer)) { }
-                    val writerOut = writer.toByteArray()
-                    val dgramPacketOut = DatagramPacket(writerOut, writerOut.size, dgramPacketIn.address, dgramPacketIn.port)
-                    establishedUdpServer.socket.send(dgramPacketOut)
-                    writer.reset()
                 }
             } catch (t: Throwable) {
                 Rlog.d(TAG, "Got exception in UDP server socket", t)
@@ -823,8 +858,18 @@ class SipHandler(
         return "3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=$cellId"
     }
 
+    private fun requireRegistrationTransport() {
+        // The periodic alarm can run while connectAttempt is still creating these.
+        // Use the existing IOException recovery path instead of a fatal lateinit access.
+        if (!this::socket.isInitialized || !this::serverSocket.isInitialized ||
+            !this::ipsecSettings.isInitialized) {
+            throw IOException("IMS registration transport is not initialized")
+        }
+    }
+
     @SuppressLint("MissingPermission")
     fun register(_writer: OutputStream? = null) {
+        requireRegistrationTransport()
         val tm = ctxt.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
 
         val cellInfoList = tm.getAllCellInfo()
@@ -884,7 +929,7 @@ class SipHandler(
                     Cseq: $registerCounter REGISTER
                     Contact: $contact
                     Supported: path, gruu, sec-agree
-                    Allow: INVITE, ACK, CANCEL, BYE, UPDATE, REFER, NOTIFY, MESSAGE, PRACK, OPTIONS
+                    Allow: INVITE, ACK, CANCEL, BYE, UPDATE, NOTIFY, MESSAGE, PRACK, OPTIONS
                     Authorization: $akaDigest
                     Require: sec-agree
                     Proxy-Require: sec-agree
@@ -957,7 +1002,7 @@ class SipHandler(
                     Supported: sec-agree
                     Require: sec-agree
                     Proxy-Require: sec-agree
-                    Allow: INVITE, ACK, CANCEL, BYE, UPDATE, REFER, NOTIFY, INFO, MESSAGE, PRACK, OPTIONS
+                    Allow: INVITE, ACK, CANCEL, BYE, UPDATE, NOTIFY, MESSAGE, PRACK, OPTIONS
                     Accept: application/reginfo+xml
                     """.toSipHeadersMap(),
             )
@@ -975,8 +1020,13 @@ class SipHandler(
     }
 
     fun waitPrack(v: Int, generation: Int = callGeneration.get()): Boolean {
+        val deadline = android.os.SystemClock.elapsedRealtime() + 32_000L
         synchronized(prAckWaitLock) {
             while (prAckWait.contains(v) && !callStopped.get() && callGeneration.get() == generation) {
+                if (android.os.SystemClock.elapsedRealtime() >= deadline) {
+                    incomingDialog?.takeIf { it.live }?.let { failIncoming(it, "Reliable provisional response timed out") }
+                    return false
+                }
                 prAckWaitLock.wait(1000)
             }
             return !callStopped.get() && callGeneration.get() == generation
@@ -984,17 +1034,35 @@ class SipHandler(
     }
 
     fun handlePrack(request: SipRequest): Int {
-        Rlog.d(TAG, "Received PRACK for ${request.headers["rack"]!![0]}")
+        val dialog = incomingDialog ?: return 481
+        if (!dialog.live || !dialog.matches(request.headers)) return 481
+        val rack = request.headers["rack"]?.firstOrNull()?.trim()?.split(Regex("\\s+")) ?: return 400
+        if (rack.size != 3 || rack[1].toLongOrNull() != dialog.inviteCseq || rack[2] != "INVITE") return 481
+        val id = rack[0].toIntOrNull() ?: return 400
         synchronized(prAckWaitLock) {
-            val id = request.headers["rack"]!![0].split(" ")[0].toInt()
-            prAckWait -= id
+            if (!prAckWait.remove(id) && id !in acknowledgedRseq) return 481
+            acknowledgedRseq.add(id)
             prAckWaitLock.notifyAll()
         }
         return 200
     }
 
     fun handleUpdate(request: SipRequest): Int {
-        val call = currentCall!!
+        return incomingLock.withLock {
+        val call = currentCall ?: return 481
+        if (request.headers["call-id"]?.firstOrNull() != call.callHeaders["call-id"]?.firstOrNull()) return 481
+        if (call.outgoing && !call.callHeaders.matchesRemoteDialog(request.headers, true)) return 481
+        val dialog = incomingDialog?.takeIf { !call.outgoing && it.live }
+        if (dialog != null && !dialog.matches(request.headers)) return 481
+        if (request.body.isEmpty()) return if (request.method == SipMethod.UPDATE) 200 else 488
+        val offer = request.body.toString(Charsets.UTF_8)
+        // Actual hold/codec/address changes need negotiation; do not pretend they succeeded.
+        if (Regex("(?m)^a=(sendonly|recvonly|inactive)\\r?$").containsMatchIn(offer)) return 488
+        val remoteMedia = offer.lineSequence().map { it.trim() }.firstOrNull { it.startsWith("m=audio ") }
+        if (remoteMedia == null || remoteMedia.split(Regex("\\s+")).getOrNull(1)?.toIntOrNull() != call.rtpRemotePort) return 488
+        val remoteAddress = offer.lineSequence().map { it.trim() }.firstOrNull { it.startsWith("c=") }?.substringAfterLast(' ')
+        if (remoteAddress == null || InetAddress.getByName(remoteAddress) != call.rtpRemoteAddr ||
+            !offer.contains("AMR/8000")) return 488
         val ipType = if (call.rtpRemoteAddr is Inet6Address) "IP6" else "IP4"
         val allTracks = listOf(call.amrTrack, call.dtmfTrack)
         call.sdpOrigin.revise()
@@ -1025,22 +1093,7 @@ a=des:qos mandatory remote sendrecv
 a=sendrecv
                        """.toSdpBody().let(::labSdp)
 
-        currentCall =
-            Call(
-                outgoing = call.outgoing,
-                amrTrack = call.amrTrack,
-                amrTrackDesc = call.amrTrackDesc,
-                dtmfTrack = call.dtmfTrack,
-                dtmfTrackDesc = call.dtmfTrackDesc,
-                callHeaders = call.callHeaders,
-                rtpRemoteAddr = call.rtpRemoteAddr,
-                rtpRemotePort = call.rtpRemotePort,
-                rtpSocket = call.rtpSocket,
-                sdp = request.body,
-                sdpOrigin = call.sdpOrigin,
-                hasEarlyMedia = call.hasEarlyMedia,
-                remoteContact = call.remoteContact,
-            )
+        currentCall = call.copy(sdp = mySdp)
 
         val reply =
             SipResponse(
@@ -1052,16 +1105,23 @@ a=sendrecv
                     } +
                         """
                     Content-Type: application/sdp
-                    Supported: 100rel, replaces, timer
-                    Require: precondition
-                    Call-ID: ${currentCall!!.callHeaders["call-id"]!![0]}
+                    Supported: 100rel, timer
+                    Call-ID: ${call.callHeaders["call-id"]!![0]}
                 """.toSipHeadersMap(),
                 body = mySdp,
             )
         Rlog.d(TAG, "Replying back with $reply")
-        synchronized(socket.gWriter()) { socket.gWriter().write(reply.toByteArray()) }
+        writeResponse(reply.toByteArray(), requestReplyWriter.get())
 
-        if (call?.outgoing == false) {
+        if (request.method == SipMethod.INVITE && dialog != null) {
+            dialog.lastInviteCseq = IncomingDialogState.cseq(request.headers) ?: return 400
+            dialog.rememberResponse(dialog.lastInviteCseq, reply.toByteArray())
+            dialog.finalResponse = dialog.lastResponse
+            dialog.finalResponseCseq = dialog.lastInviteCseq
+            dialog.finalAcknowledged = false
+            scheduleFinalResponse(dialog, dialog.lastInviteCseq, android.os.SystemClock.elapsedRealtime())
+        }
+        if (!call.outgoing && !callStarted.get()) {
             val myHeaders2 = call.callHeaders - "rseq" - "content-type" - "require"
             val msg2 =
                 SipResponse(
@@ -1074,21 +1134,58 @@ a=sendrecv
         }
 
         return 0
+        }
     }
 
     fun handleCancel(request: SipRequest): Int {
-        if (request.method == SipMethod.CANCEL && callStarted.get()) {
-            Rlog.d(TAG, "CANCEL received after 200 OK — ignoring per RFC 3261 §9.2")
+        return incomingLock.withLock {
+        val endedCallId = request.headers["call-id"]?.firstOrNull() ?: return 400
+        val previousBye = lastRemoteBye
+        if (request.method == SipMethod.BYE && previousBye != null &&
+            android.os.SystemClock.elapsedRealtime() - lastRemoteByeAt < 32_000L &&
+            listOf("call-id", "cseq", "from", "to", "via").all { request.headers[it] == previousBye[it] }) return 200
+        val dialog = incomingDialog
+        val call = currentCall
+        if (dialog != null && dialog.callId == endedCallId) {
+            synchronized(dialog) {
+                if (!dialog.matches(request.headers, request.method == SipMethod.BYE)) return 481
+                if (request.method == SipMethod.CANCEL) {
+                    if (!dialog.matchesCancel(request.headers)) return 481
+                    if (dialog.answered) return 200 // Late CANCEL cannot undo a final answer.
+                    if (!dialog.live) return 200
+                    val headers = call?.callHeaders ?: request.headers.filterKeys { it in listOf("cseq", "via", "from", "to", "call-id") }
+                    val final = SipResponse(487, "Request Terminated", headers - "rseq" - "require" - "content-type" - "content-length" +
+                        ("cseq" to listOf("${dialog.inviteCseq} INVITE"))).toByteArray()
+                    try { writeResponse(final, dialog.replyWriter) }
+                    catch (e: Exception) { Rlog.w(TAG, "Cancelled INVITE response transport failed", e) }
+                    dialog.rememberResponse(dialog.inviteCseq, final)
+                } else {
+                    if (!dialog.live) return 481
+                    lastRemoteBye = request.headers
+                    lastRemoteByeAt = android.os.SystemClock.elapsedRealtime()
+                }
+                if (!dialog.end()) return 200
+                callStopped.set(true)
+                closeMediaSockets()
+                currentCall = null
+            }
+            onCancelledCall?.invoke(Object(), "", mapOf("call-id" to endedCallId))
             return 200
+        }
+        // An unrelated BYE/CANCEL must not tear down the currently talking call.
+        if (call?.callHeaders?.get("call-id")?.firstOrNull() != endedCallId) return 481
+        if (!call.callHeaders.matchesRemoteDialog(request.headers, call.outgoing)) return 481
+        if (request.method == SipMethod.CANCEL && callStarted.get()) return 200
+        if (request.method == SipMethod.BYE) {
+            lastRemoteBye = request.headers
+            lastRemoteByeAt = android.os.SystemClock.elapsedRealtime()
         }
         callStopped.set(true)
         closeMediaSockets()
-        val endedCallId = request.headers["call-id"]!![0]
-        Rlog.d(TAG, "Cancelled call $endedCallId")
-        if (currentCall?.callHeaders?.get("call-id")?.firstOrNull() == endedCallId) currentCall = null
-
-        onCancelledCall?.invoke(Object(), "", emptyMap())
+        currentCall = null
+        onCancelledCall?.invoke(Object(), "", mapOf("call-id" to endedCallId))
         return 200
+        }
     }
 
     data class Call(
@@ -1112,6 +1209,7 @@ a=sendrecv
         body: () -> Unit,
     ) {
         val generation = callGeneration.get()
+        val mediaCallId = currentCall?.callHeaders?.get("call-id")?.firstOrNull()
         thread {
             try {
                 body()
@@ -1119,13 +1217,13 @@ a=sendrecv
                 if (callStopped.get() || callGeneration.get() != generation) return@thread
                 Rlog.e(TAG, "$what thread failed, ending the call", e)
                 try {
-                    terminateCall()
+                    if (mediaCallId != null) terminateCall(mediaCallId)
                 } catch (e2: Throwable) {
                     Rlog.e(TAG, "terminateCall() after $what failure also failed", e2)
                     callStopped.set(true)
         closeMediaSockets()
                 }
-                onCancelledCall?.invoke(Object(), "", emptyMap())
+                onCancelledCall?.invoke(Object(), "", mediaCallId?.let { mapOf("call-id" to it) } ?: emptyMap())
             }
         }
     }
@@ -1346,49 +1444,110 @@ a=sendrecv
         }
     }
 
-    var currentCall: Call? = null
+    @Volatile var currentCall: Call? = null
+    private val incomingLock = ReentrantLock()
+    @Volatile private var incomingDialog: IncomingDialogState? = null
+    @Volatile private var lastRemoteBye: SipHeadersMap? = null
+    @Volatile private var lastRemoteByeAt = 0L
 
-    fun acceptCall() {
-        val call = currentCall ?: return
+    private fun writeResponse(bytes: ByteArray, responseWriter: OutputStream? = null) {
+        val writer = responseWriter ?: socket.gWriter()
+        synchronized(writer) { writer.write(bytes) }
+    }
+
+    private fun incomingResponse(dialog: IncomingDialogState, response: SipResponse, final: Boolean = false) {
+        val bytes = response.toByteArray()
+        synchronized(dialog) {
+            if (incomingDialog !== dialog || !dialog.live) return
+            writeResponse(bytes, dialog.replyWriter)
+            dialog.rememberResponse(IncomingDialogState.cseq(response.headers) ?: dialog.inviteCseq, bytes)
+            if (final) {
+                dialog.finalResponse = bytes
+                dialog.finalResponseCseq = IncomingDialogState.cseq(response.headers)
+                dialog.finalAcknowledged = false
+            }
+        }
+    }
+
+    fun handleAck(request: SipRequest): Int {
+        incomingDialog?.acknowledge(request.headers)
+        return 0 // ACK never has a SIP response, including an unknown/late ACK.
+    }
+
+    private fun scheduleFinalResponse(dialog: IncomingDialogState, cseq: Long, started: Long, interval: Long = 500L) {
+        myHandler.postDelayed({
+            if (incomingDialog !== dialog || !dialog.live || dialog.finalAcknowledged ||
+                dialog.finalResponseCseq != cseq) return@postDelayed
+            if (android.os.SystemClock.elapsedRealtime() - started >= 32_000L) {
+                Rlog.w(TAG, "Incoming answer ACK timed out")
+                try { terminateCall(dialog.callId) } catch (e: Exception) { Rlog.w(TAG, "ACK timeout cleanup", e) }
+                onCancelledCall?.invoke(Object(), "", mapOf("call-id" to dialog.callId, "statusCode" to "408", "statusString" to "Answer ACK timed out"))
+                return@postDelayed
+            }
+            try { dialog.finalResponse?.let { writeResponse(it, dialog.replyWriter) } }
+            catch (e: Exception) {
+                Rlog.w(TAG, "Incoming final response transport failed", e)
+                failIncoming(dialog, "Answer transport failed")
+                return@postDelayed
+            }
+            scheduleFinalResponse(dialog, cseq, started, (interval * 2).coerceAtMost(4_000L))
+        }, interval)
+    }
+
+    private fun failIncoming(dialog: IncomingDialogState, detail: String, sendResponse: Boolean = true) {
+        synchronized(dialog) {
+            if (incomingDialog !== dialog || !dialog.live) return
+            if (sendResponse && !dialog.answered) {
+                val headers = (currentCall?.callHeaders ?: dialog.initialHeaders)
+                    .filterKeys { it in listOf("via", "from", "to", "call-id", "cseq") }
+                try {
+                    val failure = SipResponse(500, "Server Internal Error", headers).toByteArray()
+                    writeResponse(failure, dialog.replyWriter)
+                    dialog.rememberResponse(dialog.inviteCseq, failure)
+                } catch (_: Exception) { /* The failed transport may already be unavailable. */ }
+            }
+            dialog.end()
+            callStopped.set(true)
+            closeMediaSockets()
+            currentCall = null
+        }
+        onCancelledCall?.invoke(Object(), "", mapOf("call-id" to dialog.callId, "statusCode" to "500", "statusString" to detail))
+    }
+
+    fun acceptCall(expectedCallId: String): Boolean {
+        val dialog = incomingDialog ?: return false
+        if (dialog.callId != expectedCallId || !dialog.requestAnswer()) return false
         val generation = callGeneration.get()
         thread {
-            val pendingSeqs = synchronized(prAckWaitLock) { prAckWait.toSet() }
-            pendingSeqs.forEach { if (!waitPrack(it, generation)) return@thread }
-            if (callStopped.get() || callGeneration.get() != generation || currentCall !== call) return@thread
-
-            val local =
-                if (socket.gLocalAddr() is Inet6Address) {
-                    "[${socket.gLocalAddr().hostAddress}]:${serverSocket.localPort}"
-                } else {
-                    "${socket.gLocalAddr().hostAddress}:${serverSocket.localPort}"
+            try {
+                val pendingSeqs = synchronized(prAckWaitLock) { prAckWait.toSet() }
+                pendingSeqs.forEach { if (!waitPrack(it, generation)) return@thread }
+                synchronized(dialog) {
+                    if (incomingDialog !== dialog || !dialog.live || callStopped.get() ||
+                        callGeneration.get() != generation) return@thread
+                    // UPDATE can revise the local SDP; the dialog identity remains stable.
+                    val call = currentCall?.takeIf { it.callHeaders["call-id"]?.firstOrNull() == expectedCallId }
+                        ?: throw IOException("Incoming media session is not ready")
+                    val local = if (socket.gLocalAddr() is Inet6Address)
+                        "[${socket.gLocalAddr().hostAddress}]:${serverSocket.localPort}"
+                        else "${socket.gLocalAddr().hostAddress}:${serverSocket.localPort}"
+                    val transport = if (socket is SipConnectionTcp) "tcp" else "udp"
+                    val headers = call.callHeaders - "rseq" - "security-verify" - "require" - "content-length" +
+                        mapOf("session-expires" to listOf("900;refresher=uas"),
+                            "p-preferred-identity" to listOf("<$mySip>"),
+                            "contact" to listOf(dialogContact(local, transport)),
+                            "content-type" to listOf("application/sdp"))
+                    incomingResponse(dialog, SipResponse(200, "OK", headers, call.sdp), final = true)
+                    callStarted.set(true)
+                    if (dialog.answerSent()) onIncomingCallAccepted?.invoke(expectedCallId)
+                    scheduleFinalResponse(dialog, dialog.inviteCseq, android.os.SystemClock.elapsedRealtime())
                 }
-            val transport = if (socket is SipConnectionTcp) "tcp" else "udp"
-            val evolvedContact =
-                """<sip:$imsi@$local;transport=$transport>;expires=600000;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.smsip;+g.3gpp.mid-call;+g.3gpp.srvcc-alerting;+g.3gpp.ps2cs-srvcc-orig-pre-alerting"""
-
-            Rlog.d(TAG, "Accepting call")
-            val myHeaders = call.callHeaders
-            val myHeaders3 =
-                myHeaders - "rseq" - "security-verify" +
-                    """
-                Session-Expires: 900;refresher=uas
-                P-Preferred-Identity: <$mySip>
-                Contact: $evolvedContact
-                Content-Type: application/sdp
-                """.toSipHeadersMap()
-
-            val msg3 =
-                SipResponse(
-                    statusCode = 200,
-                    statusString = "OK",
-                    headersParam = myHeaders3,
-                    body = call.sdp,
-                )
-            Rlog.d(TAG, "Sending $msg3")
-            synchronized(socket.gWriter()) { socket.gWriter().write(msg3.toByteArray()) }
-
-            callStarted.set(true)
+            } catch (e: Exception) {
+                Rlog.w(TAG, "Incoming answer failed", e)
+                failIncoming(dialog, "Incoming answer failed")
+            }
         }
+        return true
     }
 
     fun prack(resp: SipResponse) {
@@ -1423,24 +1582,27 @@ a=sendrecv
         synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
     }
 
-    fun rejectCall() {
-        thread {
-            val call = currentCall!!
-            val headers = call.callHeaders
-            val mySeqCounter = reliableSequenceCounter++
-            val myHeaders = headers + "RSeq: $mySeqCounter".toSipHeadersMap()
-            val msg =
-                SipResponse(
-                    statusCode = 486,
-                    statusString = "Busy Here",
-                    headersParam = myHeaders,
-                )
-            Rlog.d(TAG, "Sending $msg")
-            synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
-
-            callStopped.set(true)
-        closeMediaSockets()
-            onCancelledCall?.invoke(Object(), "", emptyMap())
+    fun rejectCall(expectedCallId: String) {
+        val dialog = incomingDialog ?: return
+        synchronized(dialog) {
+            if (dialog.callId != expectedCallId || !dialog.live) return
+            if (dialog.answered) {
+                terminateCall(expectedCallId)
+                onCancelledCall?.invoke(Object(), "", mapOf("call-id" to expectedCallId))
+                return
+            }
+            val call = currentCall ?: return
+            val headers = call.callHeaders - "rseq" - "require" - "content-type" - "content-length"
+            val response = SipResponse(486, "Busy Here", headers).toByteArray()
+            try { writeResponse(response, dialog.replyWriter) }
+            finally {
+                dialog.rememberResponse(dialog.inviteCseq, response)
+                dialog.end()
+                callStopped.set(true)
+                currentCall = null
+                closeMediaSockets()
+                onCancelledCall?.invoke(Object(), "", mapOf("call-id" to expectedCallId))
+            }
         }
     }
 
@@ -1456,7 +1618,14 @@ a=sendrecv
         synchronized(socket.gWriter()) { socket.gWriter().write(cancel.toByteArray()) }
     }
 
-    fun terminateCall() {
+    fun terminateCall(expectedCallId: String? = null) {
+        val selected = currentCall
+        if (expectedCallId != null && selected?.callHeaders?.get("call-id")?.firstOrNull() != expectedCallId) return
+        if (selected?.outgoing == false && !callStarted.get()) {
+            rejectCall(selected.callHeaders["call-id"]!!.first())
+            return
+        }
+        incomingDialog?.let { if (it.callId == selected?.callHeaders?.get("call-id")?.firstOrNull()) it.end() }
         callStopped.set(true)
         closeMediaSockets()
         val invite = pendingInvite
@@ -1468,7 +1637,15 @@ a=sendrecv
         }
         val call = currentCall ?: return
         currentCall = null
-        val byeHeaders = call.callHeaders.filterKeys { it != "content-type" }
+        // BYE is a new local transaction, not a replay of the remote INVITE.
+        val byeHeaders = (commonHeaders + call.callHeaders.filterKeys {
+            it in listOf("from", "to", "call-id", "route")
+        }) - "cseq" - "content-type" - "content-length" +
+            if (call.outgoing) emptyMap() else mapOf(
+                "from" to call.callHeaders["to"].orEmpty(),
+                "to" to call.callHeaders["from"].orEmpty(),
+                "route" to call.callHeaders.uasDialogRoute(),
+            )
         val bye =
             SipRequest(
                 SipMethod.BYE,
@@ -1481,12 +1658,16 @@ a=sendrecv
 
     var respInFlight: SipResponse? = null
 
-    fun call(phoneNumber: String) {
+    fun call(phoneNumber: String, callId: String = randomBytes(12).toHex()) {
         thread {
+            if (incomingDialog?.live == true || (currentCall != null && !callStopped.get())) {
+                onOutgoingCallFailed?.invoke(486, "Only one active IMS dialog is supported")
+                return@thread
+            }
             callStopped.set(false)
             callStarted.set(false)
             threadsStarted.set(false)
-            callGeneration.incrementAndGet()
+            val generation = callGeneration.incrementAndGet()
             currentCall = null
             pendingInvite = null
 
@@ -1548,17 +1729,17 @@ a=sendrecv
                     Expires: 600000
                     Require: sec-agree
                     Proxy-Require: sec-agree
-                    Allow: INVITE, ACK, CANCEL, BYE, UPDATE, REFER, NOTIFY, MESSAGE, PRACK, OPTIONS
+                    Allow: INVITE, ACK, CANCEL, BYE, UPDATE, NOTIFY, MESSAGE, PRACK, OPTIONS
                     P-Early-Media: supported
                     Content-Type: application/sdp
                     Session-Expires: 900
-                    Supported: 100rel, replaces, timer
+                    Supported: 100rel, timer
                     Accept: application/sdp
                     Min-SE: 90
                     Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
                     P-Preferred-Service: urn:urn-7:3gpp-service.ims.icsi.mmtel
                     Contact: $contactTel
-                    """.toSipHeadersMap() + generateCallId() - "p-asserted-identity"
+                    """.toSipHeadersMap() + mapOf("call-id" to listOf(callId)) - "p-asserted-identity"
             val msg =
                 SipRequest(
                     SipMethod.INVITE,
@@ -1568,7 +1749,12 @@ a=sendrecv
                 )
             setResponseCallback(msg.headers["call-id"]!![0]) { r: SipResponse ->
                 var resp = r
-                var cseq = resp.headers["cseq"]!![0]
+                var cseq = resp.headers["cseq"]?.firstOrNull() ?: return@setResponseCallback false
+                val responseMethod = cseq.trim().substringAfterLast(' ')
+                if (responseMethod == "INVITE" && IncomingDialogState.cseq(resp.headers) != IncomingDialogState.cseq(msg.headers))
+                    return@setResponseCallback false
+                if (callGeneration.get() != generation && (responseMethod != "INVITE" || resp.statusCode < 200))
+                    return@setResponseCallback true
 
                 var rseqHandled = false
                 if (cseq.contains("PRACK")) {
@@ -1586,7 +1772,7 @@ a=sendrecv
 
                 if (cseq.contains("ACK")) return@setResponseCallback false
 
-                if (cseq.contains("INVITE") && (resp.statusCode == 200 || resp.statusCode == 202)) {
+                if (cseq.contains("INVITE") && resp.statusCode in 200..299) {
                     val cseqLine = resp.headers["cseq"]!![0]
                     val cseq = cseqLine.split(" ")[0].toInt()
                     val newTo = resp.headers["to"]!![0]
@@ -1611,7 +1797,7 @@ a=sendrecv
                     Rlog.d(TAG, "Sending $msg2")
                     synchronized(socket.gWriter()) { socket.gWriter().write(msg2.toByteArray()) }
                     if (pendingInvite === msg) pendingInvite = null
-                    if (cancelledCallId == msg.headers["call-id"]!![0]) {
+                    if (cancelledCallId == msg.headers["call-id"]!![0] || callGeneration.get() != generation) {
                         val bye = SipRequest(SipMethod.BYE, ackTo, ackHeaders - "content-type" +
                             ("to" to listOf(newTo)) + ("from" to listOf(newFrom)))
                         Rlog.d(TAG, "Answered after local CANCEL, sending BYE $bye")
@@ -1619,7 +1805,7 @@ a=sendrecv
                         rtpSocket.close()
                         return@setResponseCallback true
                     }
-                    callStarted.set(true)
+                    val firstConnected = callStarted.compareAndSet(false, true)
                     val rrFrom200Ok = resp.headers.uacDialogRoute()
                     run {
                         currentCall =
@@ -1628,16 +1814,18 @@ a=sendrecv
                             )
                     }
                     Rlog.d(TAG, "Invite got SUCCESS")
-                    onOutgoingCallConnected?.invoke(Object(), emptyMap())
+                    if (firstConnected) onOutgoingCallConnected?.invoke(Object(), emptyMap())
                 } else {
                     Rlog.d(TAG, "Invite got status ${resp.statusCode} = ${resp.statusString}")
                     if (cseq.contains("INVITE") && resp.statusCode >= 300) {
+                        if (callStarted.get()) return@setResponseCallback false
                         val ack = SipRequest(SipMethod.ACK, msg.destination,
                             msg.headers - "content-type" - "content-length" + mapOf(
                                 "cseq" to listOf(msg.headers["cseq"]!![0].substringBefore(' ') + " ACK"),
                                 "to" to resp.headers["to"].orEmpty()))
                         synchronized(socket.gWriter()) { socket.gWriter().write(ack.toByteArray()) }
                         Rlog.d(TAG, "Acknowledged failed INVITE: ${resp.statusCode}")
+                        if (callGeneration.get() != generation) return@setResponseCallback true
                         callStopped.set(true)
         closeMediaSockets()
                         rtpSocket.close()
@@ -1651,7 +1839,7 @@ a=sendrecv
                         onOutgoingCallFailed?.invoke(resp.statusCode, reason)
                         return@setResponseCallback true
                     }
-                    if (cseq.contains("INVITE") && resp.statusCode in listOf(180, 183)) {
+                    if (cseq.contains("INVITE") && resp.statusCode in listOf(180, 183) && !callStarted.get()) {
                         val earlyMedia = resp.headers["p-early-media"].orEmpty()
                             .any { it.contains("sendrecv") || it.contains("sendonly") }
                         onOutgoingCallProgressing?.invoke(earlyMedia)
@@ -1664,7 +1852,7 @@ a=sendrecv
                     return@setResponseCallback false
                 }
 
-                val isSdp = resp.headers["content-type"]?.get(0) == "application/sdp"
+                val isSdp = resp.headers["content-type"]?.firstOrNull()?.substringBefore(';')?.trim().equals("application/sdp", true)
                 val isPrecondition = resp.headers["require"]?.find { it.contains("precondition") } != null
 
                 if (!isSdp) return@setResponseCallback false
@@ -1762,7 +1950,7 @@ a=sendrecv
                     }
                 }
 
-                if (resp.statusCode == 200 && cseq.contains("INVITE") &&
+                if (resp.statusCode in 200..299 && cseq.contains("INVITE") &&
                     threadsStarted.compareAndSet(false, true)) {
                     Rlog.d(TAG, "SDP answer in 200 OK: starting media")
                     callDecodeThread()
@@ -1875,10 +2063,64 @@ a=sendrecv
 
     val prAckWaitLock = Object()
     var prAckWait = mutableSetOf<Int>()
+    private val acknowledgedRseq = mutableSetOf<Int>()
 
     fun handleCall(request: SipRequest): Int {
-        val contentType = request.headers["content-type"]?.get(0)
-        if (contentType != "application/sdp") return 404
+        val id = request.headers["call-id"]?.firstOrNull()?.takeIf { it.isNotBlank() } ?: return 400
+        val seq = IncomingDialogState.cseq(request.headers) ?: return 400
+        val remoteTag = IncomingDialogState.tag(request.headers["from"]?.firstOrNull()) ?: return 400
+        if (IncomingDialogState.branch(request.headers["via"]?.firstOrNull()) == null) return 400
+        if (request.headers["cseq"]?.firstOrNull()?.trim()?.substringAfterLast(' ') != "INVITE") return 400
+        val unsupported = request.headers["require"].orEmpty().flatMap { it.split(',') }
+            .map { it.trim().lowercase() }.filter { it !in setOf("100rel", "precondition", "timer", "sec-agree") }
+        if (unsupported.isNotEmpty()) {
+            val reply = SipResponse(420, "Bad Extension",
+                request.headers.filterKeys { it in listOf("via", "from", "to", "call-id", "cseq") } +
+                    ("unsupported" to unsupported))
+            writeResponse(reply.toByteArray(), requestReplyWriter.get())
+            return 0
+        }
+        val dialog = incomingLock.withLock {
+            val outgoing = currentCall?.takeIf { it.outgoing && it.callHeaders["call-id"]?.firstOrNull() == id }
+            if (outgoing != null) {
+                if (!outgoing.callHeaders.matchesRemoteDialog(request.headers, true)) return 481
+                // Do not create a new incoming Telecom call for the other side's re-INVITE.
+                return if (!callStarted.get()) 491 else 488
+            }
+            incomingDialog?.let { existing ->
+                when (existing.inviteAction(request.headers)) {
+                    IncomingDialogState.InviteAction.REPLAY -> {
+                        val replay = existing.responseFor(seq)
+                        requestReplyWriter.get()?.let { existing.replyWriter = it }
+                        replay?.let { writeResponse(it, existing.replyWriter) }
+                        return if (replay == null) 100 else 0
+                    }
+                    IncomingDialogState.InviteAction.IN_DIALOG -> {
+                        if (!existing.answered) {
+                            val reply = SipResponse(500, "Server Internal Error",
+                                request.headers.filterKeys { it in listOf("via", "from", "to", "call-id", "cseq") } +
+                                    ("retry-after" to listOf(kotlin.random.Random.nextInt(0, 11).toString())))
+                            val bytes = reply.toByteArray()
+                            existing.rememberResponse(seq, bytes)
+                            writeResponse(bytes, requestReplyWriter.get())
+                            return 0
+                        }
+                        return handleUpdate(request)
+                    }
+                    IncomingDialogState.InviteAction.BUSY -> return 486
+                    IncomingDialogState.InviteAction.NO_DIALOG -> return 481
+                    IncomingDialogState.InviteAction.NEW -> Unit
+                }
+            }
+            if (currentCall != null && !callStopped.get()) return 486
+            if (IncomingDialogState.tag(request.headers["to"]?.firstOrNull()) != null) return 481
+            if (!request.headers["content-type"]?.firstOrNull()?.substringBefore(';')?.trim().equals("application/sdp", true)) return 415
+            IncomingDialogState(id, seq, remoteTag, request.headers).also {
+                it.localTag = randomBytes(6).toHex()
+                it.replyWriter = requestReplyWriter.get() ?: socket.gWriter()
+                incomingDialog = it
+            }
+        }
         callStopped.set(false)
         callStarted.set(false)
         threadsStarted.set(false)
@@ -1886,15 +2128,10 @@ a=sendrecv
         val generation = callGeneration.get()
         synchronized(prAckWaitLock) {
             prAckWait.clear()
+            acknowledgedRseq.clear()
             prAckWaitLock.notifyAll()
         }
-
         val caller = incomingCallerIdentity(request.headers["from"]?.firstOrNull(), request.headers["privacy"].orEmpty())
-        Rlog.d(TAG, "Incoming caller presentation=${caller.presentation}")
-        onIncomingCall?.invoke(Object(), caller.number, mapOf(
-            "call-id" to request.headers["call-id"]!![0],
-            "caller-presentation" to caller.presentation.name,
-        ))
 
         val sdp =
             request.body
@@ -1961,12 +2198,13 @@ a=sendrecv
 
         fun trackRequirements(track: Int): String? = attributes.firstOrNull { it.startsWith("fmtp:$track") }
 
-        val hasEarlyMedia = request.headers["p-early-media"]?.isNotEmpty() == true
-        val callerSupportsPrecondition =
-            (
-                request.headers["supported"].orEmpty() +
-                    request.headers["require"].orEmpty()
-            ).any { it.contains("precondition") }
+        val supported = (request.headers["supported"].orEmpty() + request.headers["require"].orEmpty())
+            .flatMap { it.split(',') }.map { it.trim().lowercase() }
+        val required = request.headers["require"].orEmpty().flatMap { it.split(',') }.map { it.trim().lowercase() }
+        val hasEarlyMedia = request.headers["p-early-media"].orEmpty().any { it.contains("sendrecv") || it.contains("sendonly") }
+        val callerSupportsPrecondition = "precondition" in supported
+        val sendSessionProgress = hasEarlyMedia || callerSupportsPrecondition
+        val reliableProvisional = "100rel" in supported && (sendSessionProgress || "100rel" in required)
 
         val (amrTrack, amrTrackDesc) = lookTrackMatching("AMR/8000")!!
 
@@ -2030,7 +2268,7 @@ a=sendrecv
                     ) + preconditionLines + listOf("a=sendrecv")
                 ).toSdpBody().let(::labSdp)
 
-            val localToTag = randomBytes(6).toHex()
+            val localToTag = dialog.localTag!!
             val toWithTag =
                 request.headers["to"]!!.map { h ->
                     if (h.contains(";tag=")) h else "$h;tag=$localToTag"
@@ -2040,16 +2278,21 @@ a=sendrecv
                 commonHeaders + // Require: precondition
                     """
                         Contact: $contactTel
-                        Allow: INVITE, ACK, CANCEL, BYE, UPDATE, REFER, NOTIFY, INFO, MESSAGE, PRACK, OPTIONS
+                        Allow: INVITE, ACK, CANCEL, BYE, UPDATE, NOTIFY, MESSAGE, PRACK, OPTIONS
                         Content-Type: application/sdp
-                        Require: 100rel${if (callerSupportsPrecondition) ", precondition" else ""}
-                        RSeq: $mySeqCounter
                             """.toSipHeadersMap() +
-                    request.headers.filter { (k, _) -> k in listOf("cseq", "via", "from", "to", "call-id") } +
+                    request.headers.filter { (k, _) -> k in listOf("cseq", "via", "from", "to", "call-id", "record-route") } +
                     mapOf("to" to toWithTag) -
                     "route" - "security-verify"
-
-            if (hasEarlyMedia) synchronized(prAckWaitLock) { prAckWait += mySeqCounter }
+            val provisionalHeaders = if (reliableProvisional) myHeaders + mapOf(
+                "require" to listOf("100rel"), "rseq" to listOf(mySeqCounter.toString()))
+                else myHeaders - "rseq" - "require"
+            synchronized(prAckWaitLock) { if (reliableProvisional) prAckWait += mySeqCounter }
+            synchronized(dialog) {
+                if (incomingDialog !== dialog || !dialog.live || callStopped.get() || callGeneration.get() != generation) {
+                    rtpSocket.close()
+                    return@thread
+                }
             currentCall =
                 Call(
                     outgoing = false,
@@ -2057,7 +2300,7 @@ a=sendrecv
                     amrTrackDesc = amrTrackDesc,
                     dtmfTrack = dtmfTrack,
                     dtmfTrackDesc = dtmfTrackDesc,
-                    callHeaders = myHeaders - "require" - "content-type" + "Supported: 100rel, replaces, timer".toSipHeadersMap(),
+                    callHeaders = myHeaders - "require" - "content-type" + "Supported: 100rel, timer".toSipHeadersMap(),
                     rtpRemoteAddr = rtpRemoteAddr,
                     rtpRemotePort = rtpRemotePort.toInt(),
                     rtpSocket = rtpSocket,
@@ -2067,53 +2310,25 @@ a=sendrecv
                     remoteContact = extractDestinationFromContact(request.headers["contact"]!![0]),
                 )
 
+            val provisional = if (sendSessionProgress)
+                SipResponse(183, "Session Progress", provisionalHeaders, mySdp)
+                else SipResponse(180, "Ringing", provisionalHeaders - "content-type" - "content-length")
+            incomingResponse(dialog, provisional)
+            onIncomingCall?.invoke(Object(), caller.number, mapOf("call-id" to id, "caller-presentation" to caller.presentation.name))
+            }
+            if (!dialog.live) return@thread
             if (threadsStarted.compareAndSet(false, true)) {
                 callDecodeThread()
                 callEncodeThread()
             }
-
-            if (hasEarlyMedia) {
-                val msg =
-                    SipResponse(
-                        statusCode = 183,
-                        statusString = "Session Progress",
-                        headersParam = myHeaders,
-                        body = mySdp,
-                    )
-                Rlog.d(TAG, "Sending $msg")
-                synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
-                if (!waitPrack(mySeqCounter, generation)) return@thread
-            }
-            if (!hasEarlyMedia) {
-                val myHeaders2 =
-                    myHeaders - "rseq" - "content-type" - "require" +
-                        """
-Supported: 100rel, replaces, timer
-P-Access-Network-Info: ${buildPAccessNetworkInfo()}
-
-""".toSipHeadersMap()
-                val msg2 =
-                    SipResponse(
-                        statusCode = 180,
-                        statusString = "Ringing",
-                        headersParam = myHeaders2,
-                    )
-                Rlog.d(TAG, "Sending $msg2")
-                synchronized(socket.gWriter()) { socket.gWriter().write(msg2.toByteArray()) }
-            }
-        }.apply {
+                }.apply {
             uncaughtExceptionHandler = Thread.UncaughtExceptionHandler { _, e ->
                 Rlog.w(TAG, "Incoming call setup failed; ending the call", e)
-                callStopped.set(true)
-                closeMediaSockets()
-                onCancelledCall?.invoke(Object(), "", emptyMap())
+                if (callGeneration.get() == generation) failIncoming(dialog, "Incoming media setup failed")
             }
             start()
         }
 
-        if (!hasEarlyMedia) {
-            return 0
-        }
         return 100
     }
 

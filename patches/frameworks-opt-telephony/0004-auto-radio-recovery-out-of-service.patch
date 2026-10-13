@@ -1,0 +1,106 @@
+From: Haldexx <https://github.com/Haldexx>
+Subject: [PATCH] telephony: auto radio-recovery after prolonged out-of-service
+
+After a long, continuous out-of-service the Exynos Shannon modem can stop finding
+service and not recover until a manual reboot or airplane toggle. Add a conservative
+auto-recovery in ServiceStateTracker: while the radio is supposed to be on and the
+state has been OUT_OF_SERVICE for a tunable interval (persist.sys.oos_radio_recovery_min
+minutes, default 45, 0 disables) and no call is up, cycle the radio at the RIL level to
+force a fresh network attach. mDesiredPowerState is left unchanged so the normal power
+state machine restores the radio even if the explicit power-on is lost. The timer is
+cancelled as soon as service returns.
+
+NOTE: compiles; needs field validation against a real stuck-modem outage (cannot be
+reproduced on demand). Default interval is conservative; set the property to 0 to disable.
+
+---
+ .../internal/telephony/ServiceStateTracker.java | 44 +++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/src/java/com/android/internal/telephony/ServiceStateTracker.java b/src/java/com/android/internal/telephony/ServiceStateTracker.java
+index cef0ddf..a9cdbe0 100644
+--- a/src/java/com/android/internal/telephony/ServiceStateTracker.java
++++ b/src/java/com/android/internal/telephony/ServiceStateTracker.java
+@@ -282,6 +282,16 @@ public class ServiceStateTracker extends Handler {
+     // wi-fi calling.
+     protected static final int EVENT_TELECOM_VOICE_SERVICE_STATE_OVERRIDE_CHANGED = 65;
+ 
++    // Auto radio-recovery: after a prolonged, continuous out-of-service while the radio is
++    // supposed to be on, cycle the radio to force a fresh network attach. The Exynos Shannon
++    // modem can stop finding service after a long outage and otherwise needs a manual reboot or
++    // airplane toggle. Tunable via persist.sys.oos_radio_recovery_min (minutes; 0 disables).
++    private static final int EVENT_OOS_RECOVERY_RESTART = 2001;
++    private static final int EVENT_OOS_RECOVERY_POWER_ON = 2002;
++    private static final String PROP_OOS_RECOVERY_MIN = "persist.sys.oos_radio_recovery_min";
++    private static final long DEFAULT_OOS_RECOVERY_MIN = 45;
++    private boolean mOosRecoveryScheduled = false;
++
+     /**
+      * The current service state.
+      *
+@@ -1572,6 +1582,23 @@ public class ServiceStateTracker extends Handler {
+                 break;
+             }
+ 
++            case EVENT_OOS_RECOVERY_RESTART:
++                mOosRecoveryScheduled = false;
++                if (mSS.getState() == ServiceState.STATE_OUT_OF_SERVICE
++                        && mDesiredPowerState && mRadioPowerOffReasons.isEmpty() && isRadioOn()
++                        && mPhone.getState() == PhoneConstants.State.IDLE) {
++                    log("OOS recovery: still out of service; cycling radio to force re-attach");
++                    // Toggle at the RIL level only; mDesiredPowerState stays true so the normal
++                    // power-state machine restores the radio even if the power-on below is lost.
++                    mCi.setRadioPower(false, obtainMessage(EVENT_OOS_RECOVERY_POWER_ON));
++                }
++                break;
++
++            case EVENT_OOS_RECOVERY_POWER_ON:
++                log("OOS recovery: restoring radio power");
++                mCi.setRadioPower(true, null);
++                break;
++
+             case EVENT_RESET_LAST_KNOWN_CELL_IDENTITY: {
+                 if (DBG) log("EVENT_RESET_LAST_KNOWN_CELL_IDENTITY triggered");
+                 mLastKnownCellIdentity = null;
+@@ -2814,6 +2841,29 @@ public class ServiceStateTracker extends Handler {
+             .collect(Collectors.toList());
+     }
+ 
++    /**
++     * Schedule or cancel the out-of-service radio-recovery timer from the freshly polled state.
++     */
++    private void updateOutOfServiceRecovery(int newVoiceDataState) {
++        long intervalMin = SystemProperties.getLong(PROP_OOS_RECOVERY_MIN,
++                DEFAULT_OOS_RECOVERY_MIN);
++        boolean radioShouldBeOn = mDesiredPowerState && mRadioPowerOffReasons.isEmpty();
++        boolean outOfService = newVoiceDataState == ServiceState.STATE_OUT_OF_SERVICE;
++        if (intervalMin > 0 && outOfService && radioShouldBeOn && isRadioOn()) {
++            if (!mOosRecoveryScheduled) {
++                mOosRecoveryScheduled = true;
++                removeMessages(EVENT_OOS_RECOVERY_RESTART);
++                sendMessageDelayed(obtainMessage(EVENT_OOS_RECOVERY_RESTART),
++                        intervalMin * 60L * 1000L);
++                if (DBG) log("OOS recovery: radio restart scheduled in " + intervalMin + " min");
++            }
++        } else if (mOosRecoveryScheduled) {
++            mOosRecoveryScheduled = false;
++            removeMessages(EVENT_OOS_RECOVERY_RESTART);
++            if (DBG) log("OOS recovery: cancelled (in service / radio off / disabled)");
++        }
++    }
++
+     private void pollStateDone() {
+         if (TelephonyUtils.IS_DEBUGGABLE
+                 && SystemProperties.getBoolean(PROP_FORCE_ROAMING, false)) {
+@@ -2864,6 +2914,8 @@ public class ServiceStateTracker extends Handler {
+                 mSS.getState() == ServiceState.STATE_IN_SERVICE
+                         && mNewSS.getState() != ServiceState.STATE_IN_SERVICE;
+ 
++        updateOutOfServiceRecovery(mNewSS.getState());
++
+         boolean hasAirplaneModeOnChanged =
+                 mSS.getState() != ServiceState.STATE_POWER_OFF
+                         && mNewSS.getState() == ServiceState.STATE_POWER_OFF;
+-- 
+2.43.0
+

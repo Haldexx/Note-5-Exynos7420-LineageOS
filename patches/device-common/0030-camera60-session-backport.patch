@@ -1,0 +1,310 @@
+diff --git a/camera/Camera3Wrapper.cpp b/camera/Camera3Wrapper.cpp
+--- a/camera/Camera3Wrapper.cpp
++++ b/camera/Camera3Wrapper.cpp
+@@ -19,6 +19,9 @@
+ #define LOG_TAG "Camera3Wrapper"
+ #include <android/fdsan.h>
+ #include <cutils/log.h>
++#include <dlfcn.h>
++#include <cstring>
++#include <algorithm>
+ 
+ #include "CameraWrapper.h"
+ #include "Camera3Wrapper.h"
+@@ -27,6 +30,8 @@
+     camera3_device_t base;
+     int id;
+     camera3_device_t *vendor;
++    camera3_callback_ops_t native_callbacks;
++    const camera3_callback_ops_t *framework_callbacks;
+ } wrapper_camera3_device_t;
+ 
+ #define VENDOR_CALL(device, func, ...) ({ \
+@@ -57,6 +62,35 @@
+  * implementation of camera_device_ops functions
+  *******************************************************************/
+ 
++
++extern bool camera60_backport_available();
++static wrapper_camera3_device_t *callback_device(const camera3_callback_ops_t *cb) {
++    return reinterpret_cast<wrapper_camera3_device_t*>(
++        reinterpret_cast<unsigned char*>(const_cast<camera3_callback_ops_t*>(cb))-
++        offsetof(wrapper_camera3_device_t,native_callbacks));
++}
++static void camera60_result(const camera3_callback_ops_t *cb,const camera3_capture_result_t *result) {
++    auto wrapper=callback_device(cb);
++    camera3_capture_result_t normalized={};
++    // Native HAL 3.2 supplies only the prefix ending at partial_result.
++    memcpy(&normalized,result,offsetof(camera3_capture_result_t,num_physcam_metadata));
++    wrapper->framework_callbacks->process_capture_result(wrapper->framework_callbacks,&normalized);
++}
++static void camera60_notify(const camera3_callback_ops_t *cb,const camera3_notify_msg_t *msg) {
++    auto wrapper=callback_device(cb);
++    camera3_notify_msg_t normalized={};
++    normalized.type=msg->type;
++    if(msg->type==CAMERA3_MSG_SHUTTER) {
++        normalized.message.shutter.frame_number=msg->message.shutter.frame_number;
++        normalized.message.shutter.timestamp=msg->message.shutter.timestamp;
++    } else if(msg->type==CAMERA3_MSG_ERROR) {
++        normalized.message.error.frame_number=msg->message.error.frame_number;
++        normalized.message.error.error_stream=msg->message.error.error_stream;
++        normalized.message.error.error_code=msg->message.error.error_code;
++    }
++    wrapper->framework_callbacks->notify(wrapper->framework_callbacks,&normalized);
++}
++
+ static int camera3_initialize(const camera3_device_t *device, const camera3_callback_ops_t *callback_ops)
+ {
+     ALOGV("%s->%08X->%08X", __FUNCTION__, (uintptr_t)device,
+@@ -65,9 +99,107 @@
+     if (!device)
+         return -1;
+ 
++
++    if(CAMERA_ID(device)==0 && camera60_backport_available()) {
++        auto wrapper=reinterpret_cast<wrapper_camera3_device_t*>(const_cast<camera3_device_t*>(device));
++        wrapper->framework_callbacks=callback_ops;
++        wrapper->native_callbacks.process_capture_result=camera60_result;
++        wrapper->native_callbacks.notify=camera60_notify;
++        return VENDOR_CALL(device,initialize,&wrapper->native_callbacks);
++    }
+     return VENDOR_CALL(device, initialize, callback_ops);
+ }
+ 
++extern bool camera60_backport_available();
++
++// Session-parameter candidate; activates only with the matching native backport.
++static bool session60_prepare(const camera3_device *device, camera3_stream_configuration_t *streams) {
++
++    if (CAMERA_ID(device) != 0 || !camera60_backport_available()) return false;
++    camera_metadata_ro_entry fps;
++    bool desired60=streams->session_parameters &&
++        find_camera_metadata_ro_entry(streams->session_parameters,ANDROID_CONTROL_AE_TARGET_FPS_RANGE,&fps)==0 &&
++        fps.count==2 && fps.data.i32[1]==60;
++    int desiredMode=desired60?1:(streams->operation_mode==1?2:0);
++
++    int width = 0, height = 0;
++    for (unsigned int i = 0; i < streams->num_streams; ++i) {
++        auto s = streams->streams[i];
++        if (desiredMode && (s->width > 1920 || s->height > 1080)) return false;
++        if (s->width > static_cast<unsigned int>(width)) { width=s->width; height=s->height; }
++    }
++    void *lib=dlopen("libexynoscamera3.so", RTLD_NOW | RTLD_NOLOAD);
++    if (!lib) return false;
++    auto configure=dlsym(lib,"_ZN7android13ExynosCamera316configureStreamsEP28camera3_stream_configuration");
++    const unsigned char prefix[]={0x2d,0xe9,0xf0,0x4f,0xad,0xb0,0x80,0x46};
++    if (!configure || memcmp(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(configure)&~1u),prefix,sizeof(prefix))) {
++        ALOGE("camera60-session: unsupported blob"); dlclose(lib); return false;
++    }
++    auto vendor=reinterpret_cast<wrapper_camera3_device_t*>(const_cast<camera3_device*>(device))->vendor;
++    void *p=*reinterpret_cast<void**>(static_cast<unsigned char*>(vendor->priv)+0x14);
++    using GetConfig=void*(*)(void*);
++    using Check=int(*)(void*,const android::CameraParameters&);
++    using SetSamsung=void(*)(void*,bool);
++    using SetMode=void(*)(void*,unsigned int);
++    using GetInt=int(*)(void*);
++    using GetTable=int*(*)(void*,int);
++    auto config=reinterpret_cast<GetConfig>(dlsym(lib,"_ZN7android22ExynosCameraParameters9getConfigEv"));
++    auto hint=reinterpret_cast<Check>(dlsym(lib,"_ZN7android22ExynosCameraParameters18checkRecordingHintERKNS_16CameraParametersE"));
++    auto video=reinterpret_cast<Check>(dlsym(lib,"_ZN7android22ExynosCameraParameters14checkVideoSizeERKNS_16CameraParametersE"));
++    auto fast=reinterpret_cast<Check>(dlsym(lib,"_ZN7android22ExynosCameraParameters16checkFastFpsModeERKNS_16CameraParametersE"));
++    auto preview=reinterpret_cast<Check>(dlsym(lib,"_ZN7android22ExynosCameraParameters16checkPreviewSizeERKNS_16CameraParametersE"));
++    auto samsung=reinterpret_cast<SetSamsung>(dlsym(lib,"_ZN7android22ExynosCameraParameters16setSamsungCameraEb"));
++    auto mode=reinterpret_cast<SetMode>(dlsym(lib,"_ZN7android22ExynosCameraParameters16setHighSpeedModeEj"));
++    auto getMode=reinterpret_cast<GetInt>(dlsym(lib,"_ZN7android22ExynosCameraParameters13getConfigModeEv"));
++    auto table=reinterpret_cast<GetTable>(dlsym(lib,"_ZN7android22ExynosCameraParameters21getHighSpeedSizeTableEi"));
++    if (p && config && hint && video && fast && preview && samsung && mode && getMode && table) {
++
++        int previousMode=getMode(p);
++        if(desiredMode==0 && previousMode==0) { dlclose(lib); return false; }
++        auto c=static_cast<unsigned char*>(config(p));
++        // Disassembled 32-bit ExynosConfigInfo: pointer + four 0x3a4-byte mode blocks.
++        memcpy(c+0x3a8,c+0x74c,0x3a4);
++        android::CameraParameters settings;
++        settings.set("recording-hint","true");
++        settings.set("fast-fps-mode",desiredMode);
++        settings.setVideoSize(width,height);
++        settings.setPreviewSize(width,height);
++        settings.set("preview-fps-range",desired60?"60000,60000":desiredMode?"120000,120000":"30000,30000");
++        settings.setPreviewFrameRate(desired60?60:desiredMode?120:30);
++        samsung(p,true);
++        int h=hint(p,settings),v=video(p,settings);
++        if(desiredMode!=2) mode(p,desiredMode);
++        int f=fast(p,settings),pr=preview(p,settings);
++        mode(p,desiredMode);
++
++        auto setfile=reinterpret_cast<void(*)(void*)>(dlsym(lib,"_ZN7android22ExynosCameraParameters20checkSetfileYuvRangeEv"));
++        if(setfile) setfile(p);
++        auto lut=table(p,desiredMode);
++        ALOGI("camera60-session: %dx%d hint=%d video=%d fast=%d preview=%d mode=%d lut=%p",
++                width,height,h,v,f,pr,getMode(p),lut);
++        if(lut) ALOGI("camera60-session: lut %d %d %d %d %d %d %d %d %d %d %d",
++                lut[0],lut[1],lut[2],lut[3],lut[4],lut[5],lut[6],lut[7],lut[8],lut[9],lut[10]);
++        if(lut) {
++            using SetSize=void(*)(void*,int,int);
++            using Update=void(*)(void*);
++            auto sensor=reinterpret_cast<SetSize>(dlsym(lib,"_ZN7android22ExynosCameraParameters17m_setHwSensorSizeEii"));
++            auto hwPreview=reinterpret_cast<SetSize>(dlsym(lib,"_ZN7android22ExynosCameraParameters18m_setHwPreviewSizeEii"));
++            auto bns=reinterpret_cast<SetSize>(dlsym(lib,"_ZN7android22ExynosCameraParameters10setBnsSizeEii"));
++            auto binning=reinterpret_cast<Update>(dlsym(lib,"_ZN7android22ExynosCameraParameters23updateBinningScaleRatioEv"));
++            auto bnsRatio=reinterpret_cast<Update>(dlsym(lib,"_ZN7android22ExynosCameraParameters19updateBnsScaleRatioEv"));
++            if(sensor && hwPreview && bns && binning && bnsRatio) {
++                sensor(p,lut[1],lut[2]); hwPreview(p,lut[7],lut[8]);
++                bns(p,lut[3],lut[4]); binning(p); bnsRatio(p);
++            } else ALOGE("camera60-session: missing size setter");
++        }
++
++        auto restoreMode=reinterpret_cast<SetMode>(dlsym(lib,"_ZN7android22ExynosCameraParameters13setConfigModeEj"));
++        if(restoreMode) restoreMode(p,previousMode);
++    } else ALOGE("camera60-session: missing diagnostic symbol");
++    dlclose(lib);
++    return desired60;
++}
++
+ static int camera3_configure_streams(const camera3_device *device, camera3_stream_configuration_t *stream_list)
+ {
+     ALOGV("%s->%08X->%08X", __FUNCTION__, (uintptr_t)device,
+@@ -76,7 +208,22 @@
+     if (!device)
+         return -1;
+ 
+-    return VENDOR_CALL(device, configure_streams, stream_list);
++
++    if(CAMERA_ID(device)==0 && camera60_backport_available()) {
++        camera_metadata_ro_entry fps={};
++        bool desired60=stream_list->session_parameters &&
++            find_camera_metadata_ro_entry(stream_list->session_parameters,ANDROID_CONTROL_AE_TARGET_FPS_RANGE,&fps)==0 &&
++            fps.count==2 && fps.data.i32[1]==60;
++        int nextMode=desired60?1:(stream_list->operation_mode==1?2:0);
++        if(nextMode && std::any_of(stream_list->streams,stream_list->streams+stream_list->num_streams,
++            [](const camera3_stream_t *s){return s->width>1920 || s->height>1080;})) return -EINVAL;
++    }
++    bool recording60=session60_prepare(device,stream_list);
++    auto originalMode=stream_list->operation_mode;
++    if(recording60) stream_list->operation_mode=1;
++    int result=VENDOR_CALL(device, configure_streams, stream_list);
++    stream_list->operation_mode=originalMode;
++    return result;
+ }
+ 
+ static int camera3_register_stream_buffers(const camera3_device *device, const camera3_stream_buffer_set_t *buffer_set)
+@@ -161,7 +308,7 @@
+ 
+     wrapper_dev = (wrapper_camera3_device_t*) device;
+ 
+-    wrapper_dev->vendor->common.close((hw_device_t*)wrapper_dev->vendor);
++    if(wrapper_dev->vendor) wrapper_dev->vendor->common.close((hw_device_t*)wrapper_dev->vendor);
+     if (wrapper_dev->base.ops)
+         free(wrapper_dev->base.ops);
+     free(wrapper_dev);
+@@ -234,7 +381,7 @@
+         memset(camera3_ops, 0, sizeof(*camera3_ops));
+ 
+         camera3_device->base.common.tag = HARDWARE_DEVICE_TAG;
+-        camera3_device->base.common.version = CAMERA_DEVICE_API_VERSION_3_4;
++        camera3_device->base.common.version = (camera3_device->id==0 && camera60_backport_available()) ? CAMERA_DEVICE_API_VERSION_3_5 : CAMERA_DEVICE_API_VERSION_3_4;
+         camera3_device->base.common.module = (hw_module_t *)(module);
+         camera3_device->base.common.close = camera3_device_close;
+         camera3_device->base.ops = camera3_ops;
+diff --git a/camera/CameraWrapper.cpp b/camera/CameraWrapper.cpp
+--- a/camera/CameraWrapper.cpp
++++ b/camera/CameraWrapper.cpp
+@@ -20,6 +20,11 @@
+ #define LOG_TAG "CameraWrapper"
+ #include <android/fdsan.h>
+ #include <cutils/log.h>
++#include <camera/CameraMetadata.h>
++#include <dlfcn.h>
++#include <cstring>
++#include <vector>
++#include <algorithm>
+ 
+ #include "CameraWrapper.h"
+ #include "Camera2Wrapper.h"
+@@ -93,6 +98,60 @@
+     return rv;
+ }
+ 
++
++bool camera60_backport_available() {
++    if(sizeof(void*)!=4) return false;
++    void *lib=dlopen("libexynoscamera3.so",RTLD_NOW|RTLD_NOLOAD);
++    if(!lib) return false;
++    auto fn=dlsym(lib,"_ZN7android13ExynosCamera316configureStreamsEP28camera3_stream_configuration");
++    auto lut=dlsym(lib,"_ZN7android22ExynosCameraParameters20m_getPreviewSizeListEPi");
++    auto selector=dlsym(lib,"_ZN7android22ExynosCameraParameters16setHighSpeedModeEj");
++    auto code=reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(fn)&~1u);
++    auto table=reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(lut)&~1u);
++    auto nativeMode=reinterpret_cast<unsigned char*>(reinterpret_cast<uintptr_t>(selector)&~1u);
++    const unsigned char prefix[]={0x2d,0xe9,0xf0,0x4f,0xad,0xb0,0x80,0x46};
++    const unsigned char mode[]={0x02,0x21,0xf9,0xf7,0x15,0xfd};
++    const unsigned char branch[]={0x00,0x28,0x6b,0xd0,0x52,0xe0};
++    const unsigned char nativePrefix[]={0x4f,0xf4,0xf8,0x42,0x83,0x58,0x02,0x29,
++        0x04,0xbf,0x47,0xf6,0xc0,0x32,0x81,0x58};
++    bool available=fn && lut && selector && !memcmp(nativeMode,nativePrefix,16) && !memcmp(code,prefix,8) &&
++        !memcmp(code+0xbc,mode,6) && !memcmp(table+0x40,branch,6);
++    dlclose(lib);
++    return available;
++}
++
++static const camera_metadata_t *camera60_characteristics(const camera_metadata_t *original) {
++    static android::Mutex lock;
++    static camera_metadata_t *cached=nullptr;
++    android::Mutex::Autolock held(lock);
++    if(cached) return cached;
++    android::CameraMetadata data(clone_camera_metadata(original));
++    auto ranges=data.find(ANDROID_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
++    std::vector<int32_t> fps(ranges.data.i32,ranges.data.i32+ranges.count);
++    fps.insert(fps.end(),{30,60,60,60});
++    data.update(ANDROID_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES,fps.data(),fps.size());
++    auto keys=data.find(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS);
++    std::vector<int32_t> session;
++    if(keys.count) session.assign(keys.data.i32,keys.data.i32+keys.count);
++    if(std::find(session.begin(),session.end(),ANDROID_CONTROL_AE_TARGET_FPS_RANGE)==session.end())
++        session.push_back(ANDROID_CONTROL_AE_TARGET_FPS_RANGE);
++    data.update(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS,session.data(),session.size());
++    auto characteristics=data.find(ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS);
++    std::vector<int32_t> names(characteristics.data.i32,characteristics.data.i32+characteristics.count);
++    if(std::find(names.begin(),names.end(),ANDROID_REQUEST_AVAILABLE_SESSION_KEYS)==names.end())
++        names.push_back(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS);
++    data.update(ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS,names.data(),names.size());
++    auto duration=data.find(ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS);
++    std::vector<int64_t> durations(duration.data.i64,duration.data.i64+duration.count);
++    for(size_t i=0;i+3<durations.size();i+=4) {
++        if(durations[i+1]<=1920 && durations[i+2]<=1080 &&
++           durations[i]!=HAL_PIXEL_FORMAT_BLOB) durations[i+3]=16666667;
++    }
++    data.update(ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,durations.data(),durations.size());
++    cached=data.release();
++    return cached;
++}
++
+ static int camera_get_number_of_cameras(void)
+ {
+     ALOGV("%s", __FUNCTION__);
+@@ -106,7 +165,13 @@
+     ALOGV("%s", __FUNCTION__);
+     if (check_vendor_module())
+         return 0;
+-    return gVendorModule->get_camera_info(camera_id, info);
++
++    int result=gVendorModule->get_camera_info(camera_id,info);
++    if(result==0 && camera_id==0 && camera60_backport_available()) {
++        info->static_camera_characteristics=camera60_characteristics(info->static_camera_characteristics);
++        info->device_version=CAMERA_DEVICE_API_VERSION_3_5;
++    }
++    return result;
+ }
+ 
+ static int camera_set_callbacks(const camera_module_callbacks_t *callbacks)
+diff --git a/camera/Android.bp b/camera/Android.bp
+--- a/camera/Android.bp
++++ b/camera/Android.bp
+@@ -49,6 +49,7 @@
+ 
+     shared_libs: [
+         "libhardware",
++        "libdl",
+         "liblog",
+         "libcamera_client_vendor",
+         "libcamera_metadata",

@@ -1,0 +1,48 @@
+diff --git a/universal7420-common/proprietary/vendor/lib/libexynoscamera.so b/universal7420-common/proprietary/vendor/lib/libexynoscamera.so
+index b2e5f3f626ba23d42bb929f0ea4fe3a0bbb9f392..ab857fcabb43ac1442b5869e325e5e356fd3fb9e 100644
+GIT binary patch
+delta 101
+zcmex!!1vDq--Z^(7N!>F7M2#)7Pc1l7LFFq7OocV7M>Q~7QPn#7J(MQEkYs^8hNJ4
+uiMb|5rf#Wu$*CsgiJ2v?nGEq!e&#3=E{4-La0-gH2TBNS50ntr_5c9QqaYFh
+
+delta 83
+zcmex!!1vDq--Z^(7N!>F7M2#)7Pc1l7LFFq7OocV7M>Q~7QPn#7J(MQEkYs^9Eo`;
+nMfsU2rqktr3QBO8x~1kNr@9zU-@qv-+8!t&v^`KlSla^txZoOz
+
+diff --git a/universal7420-common/proprietary/vendor/lib/libexynoscamera3.so b/universal7420-common/proprietary/vendor/lib/libexynoscamera3.so
+index 20536c0ca4e414d6b5ea1fa5e1e8ec9125d91aac..cfbe2e67d4d4cdf595de4129758db1ad3a2ef5b0 100644
+GIT binary patch
+delta 121
+zcmca|$Lq=+uZ9-J7N!>F7M2#)7Pc1l7LFFq7OocV7M>Q~7QPn#7J)5-ja+tlrpbx9
+wCPt=isd>q%Cgq8lC9ata@lk%}C=$+w*hF0nryt-H5N*H0CAj?xmr%oE0Jk(KDgXcg
+
+delta 101
+zcmca|$Lq=+uZ9-J7N!>F7M2#)7Pc1l7LFFq7OocV7M>Q~7QPn#7J)5-ja<_YFbc9W
+znoehYD<C0f>Xw?9oa$`on#m9!<!7Flmr|6UnF0}YF`RyYQ$V!+3YXyaD_lYiivh;L
+BA*BES
+
+diff --git a/universal7420-common/proprietary/vendor/lib64/libexynoscamera.so b/universal7420-common/proprietary/vendor/lib64/libexynoscamera.so
+index f0580a05742983e2dd96a45acbc8f7b2b48aa3d9..6d1c0a9589ece872c8a819edb21aedcd6420105c 100644
+GIT binary patch
+delta 109
+zcmaFyBJstG#D*5e7N!>F7M2#)7Pc1l7LFFq7OocV7M>Q~7QPn#7J(MQ7NHj57LgXw
+z7O^ejt_F&Erpbx9CPt=isd>q%Cgq8lC9ata@lk%}Fp25)!s4RS?`w*&w>KGxZ*MY?
+Hc;*ZM38y4D
+
+delta 107
+zcmaFyBJstG#D*5e7N!>F7M2#)7Pc1l7LFFq7OocV7M>Q~7QPn#7J(MQ7NHj57LgXw
+z7O^ejt_IW3%Zal~nYyLsC8wH{CuWwoW-`P_`I#r?r4;37rkGBz7Zw+teqU3Jy}ijm
+Le0!6D#4~3A)r}-T
+
+diff --git a/universal7420-common/proprietary/vendor/lib64/libexynoscamera3.so b/universal7420-common/proprietary/vendor/lib64/libexynoscamera3.so
+index 33b4cf0e4f14f71708f71e834cc79a4f51b4076d..ba5d121209096f319212be5ba377aa805d97d94a 100644
+GIT binary patch
+delta 116
+zcmbR6CU(M`*oGFy7N!>F7M2#)7Pc1l7LFFq7OocV7M>Q~7QPn#7J(MQ7NHj57LhHY
+xeUHuZOp_CHO^i(4QuC5iP0AB9OI$M<;-mb`Q6!uVQAOL2JQm%4<gu8~BmfTqC}{uy
+
+delta 96
+zcmV-m0H6Pm>|K!TU4VoEgaU*Egam{Iga(8Mgb0KQgbIWUgbaiYgbsucgb;)ggc5`k
+zgcP(Dj^mf0CKm?*HJ5$H6&MyZMrCeeWkWGVX#ihZPB&q0WO8q5WQWA#6}QCW7EF>x
+C`65XG
+

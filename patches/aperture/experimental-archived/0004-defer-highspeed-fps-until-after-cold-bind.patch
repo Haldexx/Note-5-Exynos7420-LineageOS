@@ -1,0 +1,148 @@
+From: Haldexx <https://github.com/Haldexx>
+Subject: [PATCH] aperture: avoid cold-starting video into the Exynos high-speed path
+
+Restoring a remembered high-speed (> 30 fps) video mode made the first camera session
+on a cold launch open directly in the Exynos high-speed pipeline, which starves the
+preview buffer queue (3AA inputFrameQ timeout) and shows a black preview. Switching
+into a high-speed mode at runtime already works because the mode change closes and
+reopens the device first.
+
+On a cold start, clamp the first video session to a safe frame rate, then restore the
+remembered high-speed rate as a normal reconfigure once the primer session is open.
+That reconfigure runs the existing close-and-reopen path, which configures high speed
+reliably. The remembered preference is left untouched.
+
+---
+ app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt | 81 +++++++++++++++++-
+ 1 file changed, 79 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
+--- a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
++++ b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
+@@ -18,6 +18,7 @@
+ import android.util.Log
+ import android.view.OrientationEventListener
+ import androidx.camera.core.AspectRatio
++import androidx.camera.core.CameraState as CameraXCameraState
+ import androidx.camera.core.ExperimentalZeroShutterLag
+ import androidx.camera.core.ImageCapture
+ import androidx.camera.core.ImageCaptureException
+@@ -58,6 +59,7 @@
+ import kotlinx.coroutines.flow.stateIn
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.withTimeoutOrNull
+ import org.lineageos.aperture.ext.applicationContext
+ import org.lineageos.aperture.ext.broadcastReceiverFlow
+ import org.lineageos.aperture.ext.flashMode
+@@ -78,6 +80,7 @@
+ import org.lineageos.aperture.models.EdgeMode
+ import org.lineageos.aperture.models.Event
+ import org.lineageos.aperture.models.FlashMode
++import org.lineageos.aperture.models.FrameRate
+ import org.lineageos.aperture.models.GridMode
+ import org.lineageos.aperture.models.HardwareKey
+ import org.lineageos.aperture.models.HotPixelMode
+@@ -181,6 +184,8 @@
+      */
+     val inSingleCaptureMode = MutableStateFlow(false)
+ 
++    private var pendingColdHighSpeedFrameRate: FrameRate? = null
++
+     private val _cameraConfiguration = MutableStateFlow<CameraConfiguration?>(null)
+     val cameraConfiguration = _cameraConfiguration
+         .filterNotNull()
+@@ -987,17 +992,89 @@
+             cameraFacing = cameraFacing,
+         ) ?: return false
+ 
+-        val cameraConfiguration = createInitialCameraConfiguration(
++        var cameraConfiguration = createInitialCameraConfiguration(
+             camera = camera,
+             cameraMode = cameraMode,
+         )
+ 
++        // A cold start directly into a high-speed (> 30 fps) video mode opens the first HAL
++        // session straight in the Exynos high-speed path, which starves the preview pipeline and
++        // shows a black preview. Start this first session at a safe frame rate, then restore the
++        // remembered high-speed rate as a normal reconfigure once the camera is open: that closes
++        // and reopens the device, which is the path that configures high speed reliably.
++        (cameraConfiguration as? CameraConfiguration.Video)?.let { video ->
++            val target = video.videoFrameRate
++            if (target != null && target.value > FrameRate.FPS_30.value) {
++                val safe = safeColdStartFrameRate(camera, video.videoQuality, target)
++                if (safe != null && safe != target) {
++                    cameraConfiguration = video.copy(videoFrameRate = safe)
++                    pendingColdHighSpeedFrameRate = target
++                }
++            }
++        }
++
+         _cameraConfiguration.value = cameraConfiguration
+ 
++        pendingColdHighSpeedFrameRate?.let { scheduleColdHighSpeedRestore(it) }
++
+         return true
+     }
+ 
+     /**
++     * Pick a frame rate that does not trigger the Exynos high-speed path, for a cold start.
++     */
++    private fun safeColdStartFrameRate(
++        camera: Camera,
++        videoQuality: androidx.camera.video.Quality,
++        target: FrameRate,
++    ): FrameRate? {
++        val supported = camera.supportedVideoQualities[videoQuality]?.supportedFrameRates
++            ?: return null
++        return supported.filter { it.value <= FrameRate.FPS_30.value }.maxByOrNull { it.value }
++            ?: supported.minByOrNull { it.value }
++    }
++
++    /**
++     * After a cold start that was clamped to a safe frame rate, restore the remembered high-speed
++     * rate as a normal reconfigure. Waits for the primer session to actually open so the
++     * reconfigure closes and reopens the device (the reliable high-speed path).
++     */
++    private fun scheduleColdHighSpeedRestore(target: FrameRate) {
++        viewModelScope.launch {
++            val opened = withTimeoutOrNull(8_000L) {
++                var info = cameraController.cameraInfo
++                while (info == null) {
++                    delay(50)
++                    info = cameraController.cameraInfo
++                }
++                info.cameraState.asFlow().first {
++                    it.type == CameraXCameraState.Type.OPEN
++                }
++                true
++            }
++            pendingColdHighSpeedFrameRate = null
++            if (opened == null) {
++                Log.w(LOG_TAG, "Primer camera did not open; keeping safe frame rate")
++                return@launch
++            }
++            var applied = false
++            var attempts = 0
++            while (!applied && attempts < 40) {
++                applied = canRestartCamera() && updateConfiguration<CameraConfiguration.Video> {
++                    it.copy(videoFrameRate = target)
++                }
++                if (!applied) {
++                    delay(50)
++                    attempts++
++                }
++            }
++            if (!applied) {
++                Log.w(LOG_TAG, "Could not restore high-speed frame rate after cold start")
++            }
++        }
++    }
++
++    /**
+      * @see CameraRepository.getExtensionEnabledCameraSelector
+      */
+     fun getExtensionEnabledCameraSelector(
+-- 
+2.43.0
+

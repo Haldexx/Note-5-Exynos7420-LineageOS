@@ -1,0 +1,13 @@
+diff --git a/services/core/java/com/android/server/display/mode/VoteSummary.java b/services/core/java/com/android/server/display/mode/VoteSummary.java
+--- a/services/core/java/com/android/server/display/mode/VoteSummary.java
++++ b/services/core/java/com/android/server/display/mode/VoteSummary.java
+@@ -193,6 +193,9 @@
+     void disableModeSwitching(float fps) {
+         minPhysicalRefreshRate = maxPhysicalRefreshRate = fps;
+         maxRenderFrameRate = Math.min(maxRenderFrameRate, fps);
++        // A fixed physical mode may be below the requested rendering minimum.
++        // Keep the selected render range valid after limiting its maximum.
++        minRenderFrameRate = Math.min(minRenderFrameRate, maxRenderFrameRate);
+ 
+         if (mLoggingEnabled) {
+             Slog.i(TAG, "Disabled mode switching on summary: " + this);

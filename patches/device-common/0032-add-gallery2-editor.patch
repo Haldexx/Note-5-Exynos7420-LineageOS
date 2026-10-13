@@ -1,0 +1,30 @@
+From: Haldexx <https://github.com/Haldexx>
+Subject: [PATCH] common: add Gallery2 as the photo editor backend
+
+The default gallery (Glimpse) has no built-in photo editor; its edit button fires an
+ACTION_EDIT intent that had no in-ROM handler (only Google Photos from GApps). Add
+Gallery2, whose manifest is already editor-only (FilterShowActivity/CropActivity for
+ACTION_EDIT and CROP). Restores in-gallery editing (crop, filters, adjust) without
+GApps. Verified on N920I: the editor opens and renders on Android 16.
+
+---
+ device-common.mk | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/device-common.mk b/device-common.mk
+--- a/device-common.mk
++++ b/device-common.mk
+@@ -30,6 +30,10 @@
+ PRODUCT_PACKAGES += \
+ 	AdvancedDisplay
+ 
++# Gallery editor backend for Glimpse (ACTION_EDIT: crop, filters, adjust)
++PRODUCT_PACKAGES += \
++	Gallery2
++
+ # Atrace HAL
+ PRODUCT_PACKAGES += \
+ 	android.hardware.atrace@1.0-service.universal7420
+-- 
+2.43.0
+

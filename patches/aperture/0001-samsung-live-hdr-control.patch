@@ -1,0 +1,139 @@
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+index edae6e0..11a3997 100644
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -37,6 +37,7 @@ import android.widget.Toast
+ import androidx.activity.enableEdgeToEdge
+ import androidx.activity.viewModels
+ import androidx.appcompat.app.AppCompatActivity
++import android.hardware.camera2.CaptureRequest
+ import androidx.camera.camera2.interop.CaptureRequestOptions
+ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+ import androidx.camera.core.AspectRatio
+@@ -155,6 +156,20 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
+     private val capturePreviewLayout by lazy { findViewById<CapturePreviewLayout>(R.id.capturePreviewLayout) }
+     private val countDownView by lazy { findViewById<CountDownView>(R.id.countDownView) }
+     private val effectButton by lazy { findViewById<Button>(R.id.effectButton) }
++    private val liveHdrButton by lazy { findViewById<Button>(R.id.liveHdrButton) }
++    private val liveHdrPreferences by lazy { getSharedPreferences("live_hdr", MODE_PRIVATE) }
++    private var liveHdrCameraSupported = false
++    private val liveHdrKey = CaptureRequest.Key(
++        "samsung.android.control.liveHdrLevel", Int::class.javaObjectType
++    )
++
++    private fun updateLiveHdrButton() {
++        val enabled = liveHdrPreferences.getBoolean("enabled", false)
++        liveHdrButton.setText(if (enabled) R.string.live_hdr_on else R.string.live_hdr_off)
++        liveHdrButton.setCompoundDrawablesWithIntrinsicBounds(
++            0, if (enabled) R.drawable.ic_hdr_on else R.drawable.ic_hdr_off, 0, 0
++        )
++    }
+     private val exposureLevel by lazy { findViewById<VerticalSlider>(R.id.exposureLevel) }
+     private val flashButton by lazy { findViewById<ImageButton>(R.id.flashButton) }
+     private val flipCameraButton by lazy { findViewById<ImageButton>(R.id.flipCameraButton) }
+@@ -435,6 +450,18 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
+         videoFrameRateButton.setOnClickListener { viewModel.cycleVideoFrameRate() }
+         videoDynamicRangeButton.setOnClickListener { viewModel.cycleVideoDynamicRange() }
+         effectButton.setOnClickListener { viewModel.cycleExtensionMode() }
++        liveHdrButton.setOnClickListener {
++            if (liveHdrCameraSupported && viewModel.cameraState.value == CameraState.IDLE) {
++                val enabled = !liveHdrPreferences.getBoolean("enabled", false)
++                liveHdrPreferences.edit().putBoolean("enabled", enabled).apply()
++                viewModel.cameraController.camera2CameraControl?.addCaptureRequestOptions(
++                    CaptureRequestOptions.Builder()
++                        .setCaptureRequestOption(liveHdrKey, if (enabled) 1 else 0)
++                        .build()
++                )
++                updateLiveHdrButton()
++            }
++        }
+         gridButton.setOnClickListener { viewModel.cycleGridMode() }
+         timerButton.setOnClickListener { viewModel.toggleTimerMode() }
+         micButton.setOnClickListener { viewModel.toggleVideoMicrophoneEnabled() }
+@@ -871,6 +898,7 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
+                 timerButton.isEnabled = cameraState == CameraState.IDLE
+                 aspectRatioButton.isEnabled = cameraState == CameraState.IDLE
+                 effectButton.isEnabled = cameraState == CameraState.IDLE
++                liveHdrButton.isEnabled = cameraState == CameraState.IDLE
+                 settingsButton.isEnabled = cameraState == CameraState.IDLE
+ 
+                 lensSelectorLayout.setCameraState(cameraState)
+@@ -1460,6 +1488,11 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
+             "Trying to rebind camera while camera is not in IDLE state"
+         }
+ 
++        liveHdrCameraSupported = cameraConfiguration.camera.supportsSamsungLiveHdr &&
++                cameraConfiguration.cameraMode != CameraMode.QR
++        liveHdrButton.isVisible = liveHdrCameraSupported
++        updateLiveHdrButton()
++
+         // Show blurred preview
+         previewBlurView.freeze()
+         previewBlurView.isVisible = true
+@@ -1651,6 +1684,15 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
+                 .setColorCorrectionAberrationMode(camera2Options.colorCorrectionAberrationMode)
+                 .setDistortionCorrectionMode(camera2Options.distortionCorrectionMode)
+                 .setHotPixelMode(camera2Options.hotPixelMode)
++                .apply {
++                    if (cameraConfiguration.camera.supportsSamsungLiveHdr) {
++                        setCaptureRequestOption(
++                            liveHdrKey,
++                            if (cameraConfiguration.cameraMode != CameraMode.QR &&
++                                liveHdrPreferences.getBoolean("enabled", false)) 1 else 0
++                        )
++                    }
++                }
+                 .build()
+             )
+         }
+diff --git a/app/src/main/java/org/lineageos/aperture/models/Camera.kt b/app/src/main/java/org/lineageos/aperture/models/Camera.kt
+index 0847e6f..3428ab2 100644
+--- a/app/src/main/java/org/lineageos/aperture/models/Camera.kt
++++ b/app/src/main/java/org/lineageos/aperture/models/Camera.kt
+@@ -141,6 +141,16 @@ class Camera private constructor(
+         }
+     }
+ 
++    // Samsung Live HDR produces ordinary SDR frames with improved tone mapping.
++    // It is independent of CameraX extensions and 10-bit HDR output support.
++    val supportsSamsungLiveHdr = runCatching {
++        camera2CameraInfo.getCameraCharacteristic(
++            CameraCharacteristics.Key(
++                "samsung.android.control.liveHdrLevelRange", IntArray::class.java
++            )
++        )?.let { it.size == 2 && it[0] == 0 && it[1] >= 1 } == true
++    }.getOrDefault(false)
++
+     val supportsZsl = cameraInfo.isZslSupported
+ 
+     val cameraXCameraState = cameraInfo.cameraState.asFlow<CameraState>()
+diff --git a/app/src/main/res/layout/activity_camera.xml b/app/src/main/res/layout/activity_camera.xml
+index d5f291f..8c4dd2e 100644
+--- a/app/src/main/res/layout/activity_camera.xml
++++ b/app/src/main/res/layout/activity_camera.xml
+@@ -154,6 +154,14 @@
+                 android:drawableTop="@drawable/ic_blur_off"
+                 android:text="@string/effect_none" />
+ 
++            <!-- Live HDR is supported in both photo and video modes. -->
++            <Button
++                android:id="@+id/liveHdrButton"
++                style="@style/Theme.Aperture.Camera.SecondaryTopBarButton"
++                android:drawableTop="@drawable/ic_hdr_off"
++                android:text="@string/live_hdr_off"
++                android:visibility="gone" />
++
+             <!-- Video mode specific settings -->
+             <Button
+                 android:id="@+id/videoQualityButton"
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index f29f5c6..15b8192 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -251,4 +251,6 @@
+     <string name="video_mirror_mode_off">Off</string>
+     <string name="video_mirror_mode_on">On</string>
+     <string name="video_mirror_mode_on_ffc_only">Front facing camera only</string>
++    <string name="live_hdr_off">Live HDR off</string>
++    <string name="live_hdr_on">Live HDR on</string>
+ </resources>

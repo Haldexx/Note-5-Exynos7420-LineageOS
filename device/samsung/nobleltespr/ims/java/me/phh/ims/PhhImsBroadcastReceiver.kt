@@ -33,7 +33,10 @@ class PhhImsBroadcastReceiver : BroadcastReceiver() {
     ) {
         Rlog.d(TAG, "Alarm fired with ${intent.action}")
         if (intent.action == ALARM_PERIODIC_REGISTER) {
-            val imsService = PhhImsService.Companion.instance!!
+            val imsService = PhhImsService.Companion.instance ?: run {
+                Rlog.w(TAG, "Ignoring periodic REGISTER before IMS service creation")
+                return
+            }
             imsService.armPeriodicRegisterAlarm()
             CoroutineScope(Dispatchers.IO).launch {
                 val sipHandler = imsService.mmTelFeature?.getSipHandlerOrNull()

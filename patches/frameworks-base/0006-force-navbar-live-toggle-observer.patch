@@ -1,0 +1,42 @@
+From: Haldexx
+Subject: [PATCH] wm: apply the forced navigation bar live
+
+The LineageOS buttons toggle writes LineageSettings.System.FORCE_SHOW_NAVBAR,
+which DisplayPolicy only read at boot, so enabling the navigation bar needed a
+reboot to appear. Observe the key and recompute on change so it applies at once.
+
+---
+ services/core/java/com/android/server/wm/DisplayPolicy.java | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/services/core/java/com/android/server/wm/DisplayPolicy.java b/services/core/java/com/android/server/wm/DisplayPolicy.java
+--- a/services/core/java/com/android/server/wm/DisplayPolicy.java
++++ b/services/core/java/com/android/server/wm/DisplayPolicy.java
+@@ -103,6 +103,7 @@
+ import android.os.SystemClock;
+ import android.os.SystemProperties;
+ import android.os.Trace;
++import android.database.ContentObserver;
+ import android.os.UserHandle;
+ import android.util.ArrayMap;
+ import android.util.ArraySet;
+@@ -714,6 +715,16 @@
+         mForceShowNavBarSettingsObserver.setOnChangeRunnable(this::updateForceShowNavBarSettings);
+         mForceShowNavigationBarEnabled = isForceShowNavBarSettingEnabled();
+         mHandler.post(mForceShowNavBarSettingsObserver::register);
++        // Apply the LineageOS buttons toggle (FORCE_SHOW_NAVBAR) live, without a reboot.
++        mContext.getContentResolver().registerContentObserver(
++                LineageSettings.System.getUriFor(LineageSettings.System.FORCE_SHOW_NAVBAR),
++                false,
++                new ContentObserver(mHandler) {
++                    @Override
++                    public void onChange(boolean selfChange) {
++                        updateForceShowNavBarSettings();
++                    }
++                }, UserHandle.USER_ALL);
+     }
+ 
+     private void updateForceShowNavBarSettings() {
+-- 
+2.43.0
+

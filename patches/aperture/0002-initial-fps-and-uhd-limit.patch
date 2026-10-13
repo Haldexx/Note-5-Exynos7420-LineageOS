@@ -1,0 +1,47 @@
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -1594,6 +1594,12 @@
+                     "Video dynamic range not supported with the requested video quality"
+                 }
+ 
++                // Select the frame rate before CameraX configures the session.
++                // Updating only repeating requests can leave a legacy sensor in its 30 FPS mode.
++                viewModel.cameraController.videoCaptureTargetFrameRate =
++                    cameraConfiguration.videoFrameRate?.let { android.util.Range(it.value, it.value) }
++                        ?: android.util.Range(0, 0)
++
+                 // Set the quality
+                 viewModel.cameraController.videoCaptureQualitySelector =
+                     QualitySelector.from(cameraConfiguration.videoQuality)
+diff --git a/app/src/main/java/org/lineageos/aperture/models/Camera.kt b/app/src/main/java/org/lineageos/aperture/models/Camera.kt
+--- a/app/src/main/java/org/lineageos/aperture/models/Camera.kt
++++ b/app/src/main/java/org/lineageos/aperture/models/Camera.kt
+@@ -98,6 +98,15 @@
+         videoCapabilities.getSupportedQualities(it.dynamicRange)
+     }
+ 
++    // AE ranges apply to the camera globally; UHD may have a lower capture rate.
++    private val uhdMinFrameDuration = runCatching {
++        camera2CameraInfo.getCameraCharacteristic(
++            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
++        )?.getOutputMinFrameDuration(
++            android.graphics.ImageFormat.PRIVATE, android.util.Size(3840, 2160)
++        ) ?: 0L
++    }.getOrDefault(0L)
++
+     val supportedVideoQualities =
+         videoQualityForDynamicRanges.values.flatten().toSet().associateWith {
+             VideoQualityInfo(
+@@ -110,6 +119,11 @@
+                             add(frameRate)
+                         }
+                     }
++                    if (it == Quality.UHD && uhdMinFrameDuration > 0L) {
++                        removeAll { frameRate ->
++                            frameRate.value.toLong() * uhdMinFrameDuration > 1_000_000_000L
++                        }
++                    }
+                 }.toSet(),
+                 videoQualityForDynamicRanges.entries.filter { dynamicRangeToQualities ->
+                     dynamicRangeToQualities.value.contains(it)

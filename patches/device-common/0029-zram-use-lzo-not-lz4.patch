@@ -1,0 +1,32 @@
+From: Haldexx
+Subject: [PATCH] zram: use the lzo compressor instead of lz4
+
+The 3.10 tree ships the original 2013 LG LZ4 import (lib/lz4, "Based on LZ4
+implementation by Yann Collet, Copyright 2011-2012"), the version upstream
+replaced wholesale in 4.11 for correctness. Under heavy zram swap it can
+return corrupt bytes on swap-in, seen as cross-process memory corruption:
+an ART region-space GC abort (com.android.vending,
+region_space_alloc_size=1364202384), a SIGSEGV executing a non-executable
+page (com.spotify.music), and downloaded Play Store APK bytes failing their
+own signature. The kernel default compressor is lzo; this rc overrode it to
+lz4. Use lzo, the long-proven default, and keep zram enabled.
+
+---
+ ramdisk/etc/init.samsungexynos7420.rc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ramdisk/etc/init.samsungexynos7420.rc b/ramdisk/etc/init.samsungexynos7420.rc
+--- a/ramdisk/etc/init.samsungexynos7420.rc
++++ b/ramdisk/etc/init.samsungexynos7420.rc
+@@ -17,7 +17,7 @@
+     restorecon /metadata
+ 
+     # ZRAM setup
+-    write /sys/block/zram0/comp_algorithm lz4
++    write /sys/block/zram0/comp_algorithm lzo
+ 
+ on init
+     start watchdogd
+-- 
+2.43.0
+

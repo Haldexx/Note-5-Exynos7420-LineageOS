@@ -1,0 +1,125 @@
+From: Haldexx
+Subject: [PATCH] buttons: option to keep hardware keys with the navigation bar
+
+The on-screen navigation bar toggle also disabled the capacitive hardware keys.
+Add a "Keep hardware buttons" switch under the navigation bar category so the
+user can show the navigation bar and keep the hardware keys working. The choice
+is stored in Settings.System (keep_hardware_keys_with_navbar) and honoured by
+both the runtime writer and the boot-time key-disabler restore.
+
+---
+diff --git a/src/org/lineageos/lineageparts/input/ButtonSettings.java b/src/org/lineageos/lineageparts/input/ButtonSettings.java
+--- a/src/org/lineageos/lineageparts/input/ButtonSettings.java
++++ b/src/org/lineageos/lineageparts/input/ButtonSettings.java
+@@ -80,6 +80,8 @@
+     private static final String KEY_VOLUME_WAKE_SCREEN = "volume_wake_screen";
+     private static final String KEY_VOLUME_ANSWER_CALL = "volume_answer_call";
+     private static final String KEY_DISABLE_NAV_KEYS = "disable_nav_keys";
++    private static final String KEY_KEEP_HARDWARE_KEYS = "keep_hardware_keys";
++    private static final String KEEP_HW_KEYS_SETTING = "keep_hardware_keys_with_navbar";
+     private static final String KEY_NAVIGATION_BACK_LONG_PRESS = "navigation_back_long_press";
+     private static final String KEY_NAVIGATION_HOME_LONG_PRESS = "navigation_home_long_press";
+     private static final String KEY_NAVIGATION_HOME_DOUBLE_TAP = "navigation_home_double_tap";
+@@ -135,6 +137,7 @@
+     private SwitchPreferenceCompat mEnableTaskbar;
+ 
+     private PreferenceCategory mNavigationPreferencesCat;
++    private SwitchPreferenceCompat mKeepHardwareKeys;
+ 
+     private Handler mHandler;
+ 
+@@ -244,13 +247,21 @@
+         mEdgeLongSwipeAction = initList(KEY_EDGE_LONG_SWIPE, edgeLongSwipeAction);
+ 
+         // Hardware key disabler
++        mKeepHardwareKeys = findPreference(KEY_KEEP_HARDWARE_KEYS);
+         if (isKeyDisablerSupported(getActivity())) {
+             // Remove keys that can be provided by the navbar
+             updateDisableNavkeysOption();
+             mNavigationPreferencesCat.setEnabled(mDisableNavigationKeys.isChecked());
+             mDisableNavigationKeys.setDisableDependentsState(true);
++            if (mKeepHardwareKeys != null) {
++                mKeepHardwareKeys.setChecked(isKeepHardwareKeys());
++                mKeepHardwareKeys.setOnPreferenceChangeListener(this);
++            }
+         } else {
+             prefScreen.removePreference(mDisableNavigationKeys);
++            if (mKeepHardwareKeys != null) {
++                mNavigationPreferencesCat.removePreference(mKeepHardwareKeys);
++            }
+         }
+         updateDisableNavkeysCategories(mDisableNavigationKeys.isChecked(), /* force */ true);
+ 
+@@ -578,6 +589,14 @@
+ 
+     @Override
+     public boolean onPreferenceChange(Preference preference, Object newValue) {
++        if (preference == mKeepHardwareKeys) {
++            boolean keep = (Boolean) newValue;
++            Settings.System.putIntForUser(requireActivity().getContentResolver(),
++                    KEEP_HW_KEYS_SETTING, keep ? 1 : 0, UserHandle.USER_CURRENT);
++            mHardware.set(LineageHardwareManager.FEATURE_KEY_DISABLE,
++                    mDisableNavigationKeys.isChecked() && !keep);
++            return true;
++        }
+         if (preference == mBackLongPressAction ||
+                 preference == mNavigationBackLongPressAction) {
+             handleListChange((ListPreference) preference, newValue,
+@@ -660,7 +679,13 @@
+     private void writeDisableNavkeysOption(boolean enabled) {
+         LineageSettings.System.putIntForUser(requireActivity().getContentResolver(),
+                 LineageSettings.System.FORCE_SHOW_NAVBAR, enabled ? 1 : 0, UserHandle.USER_CURRENT);
+-        mHardware.set(LineageHardwareManager.FEATURE_KEY_DISABLE, enabled);
++        mHardware.set(LineageHardwareManager.FEATURE_KEY_DISABLE,
++                enabled && !isKeepHardwareKeys());
++    }
++
++    private boolean isKeepHardwareKeys() {
++        return Settings.System.getIntForUser(requireActivity().getContentResolver(),
++                KEEP_HW_KEYS_SETTING, 0, UserHandle.USER_CURRENT) != 0;
+     }
+ 
+     private void updateDisableNavkeysOption() {
+@@ -766,8 +791,10 @@
+         boolean enabled = LineageSettings.System.getIntForUser(context.getContentResolver(),
+                 LineageSettings.System.FORCE_SHOW_NAVBAR, 0, UserHandle.USER_CURRENT) != 0;
+ 
++        final boolean keep = Settings.System.getIntForUser(context.getContentResolver(),
++                KEEP_HW_KEYS_SETTING, 0, UserHandle.USER_CURRENT) != 0;
+         final LineageHardwareManager hardware = LineageHardwareManager.getInstance(context);
+-        hardware.set(LineageHardwareManager.FEATURE_KEY_DISABLE, enabled);
++        hardware.set(LineageHardwareManager.FEATURE_KEY_DISABLE, enabled && !keep);
+     }
+ 
+     public static void restoreKeySwapper(Context context) {
+diff --git a/res/xml/button_settings.xml b/res/xml/button_settings.xml
+--- a/res/xml/button_settings.xml
++++ b/res/xml/button_settings.xml
+@@ -38,6 +38,12 @@
+                 android:key="enable_taskbar"
+                 android:title="@string/navigation_bar_enable_taskbar_title" />
+ 
++        <SwitchPreferenceCompat
++                android:key="keep_hardware_keys"
++                android:persistent="false"
++                android:title="@string/navigation_bar_keep_hardware_keys_title"
++                android:summary="@string/navigation_bar_keep_hardware_keys_summary" />
++
+         <ListPreference
+             android:key="navigation_back_long_press"
+             android:dialogTitle="@string/navigation_bar_back_long_press_title"
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -255,6 +255,8 @@
+     <!-- Navigation Bar -->
+     <string name="navigation_bar_category">Navigation bar</string>
+     <string name="navigation_bar_enable_taskbar_title">Enable taskbar</string>
++    <string name="navigation_bar_keep_hardware_keys_title">Keep hardware buttons</string>
++    <string name="navigation_bar_keep_hardware_keys_summary">Leave the capacitive hardware buttons working while the on-screen navigation bar is shown</string>
+     <string name="navigation_bar_left_summary">Place the navigation bar on the left side of the screen in landscape mode</string>
+     <string name="navigation_bar_back_long_press_title">Back long press action</string>
+     <string name="navigation_bar_home_long_press_title">Home long press action</string>
+-- 
+2.43.0
+

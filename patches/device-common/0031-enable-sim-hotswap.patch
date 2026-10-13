@@ -1,0 +1,28 @@
+From: Haldexx
+Subject: [PATCH] overlay: enable SIM hotswap
+
+config_hotswapCapable defaults to false, so removing or inserting a SIM while
+powered on shows a "reboot required" prompt instead of being handled live. The
+Shannon modem reports the SIM card-state change (which drives onIccSwap), so set
+config_hotswapCapable=true in the common overlay to handle the swap without a
+reboot on every noblelte variant.
+
+---
+ overlay/frameworks/base/core/res/res/values/config.xml | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/overlay/frameworks/base/core/res/res/values/config.xml b/overlay/frameworks/base/core/res/res/values/config.xml
+--- a/overlay/frameworks/base/core/res/res/values/config.xml
++++ b/overlay/frameworks/base/core/res/res/values/config.xml
+@@ -950,4 +950,8 @@
+          manager will disable alpha trasformation in animations where not
+          strictly needed. -->
+     <bool name="config_sf_limitedAlpha">true</bool>
++
++    <!-- SIM hotswap: the Shannon modem reports SIM insert/remove, so handle a card swap
++         live (no "reboot required" prompt). -->
++    <bool name="config_hotswapCapable">true</bool>
+ </resources>
+-- 
+2.43.0
+

@@ -72,6 +72,10 @@ for entry in 'system/core:system-core:0e96ff13d90df568ddd788bb02b3ddb6e3641528' 
              'packages/modules/Connectivity:connectivity:c9f3e7795256bd4a3f99d02e604e24fd1552c2b3' \
              'system/netd:netd:796eaca5ab9dfdd87751c51bb71fa3f26c87d034' \
              'packages/services/Telephony:telephony:7ec78c63c51a9651cfb59c7ef04cf91036eb76c1' \
+             'packages/apps/Launcher3:launcher3:ee25ab865b59ecda9c8fd6f901e80b48d7b789ea' \
+             'packages/apps/Aperture:aperture:9ec3d514dce26beda1f85afbab538cc33224c556' \
+             'packages/apps/Twelve:twelve:ff47609217005427943b87355d7acdbf12321486' \
+             'packages/apps/LineageParts:lineageparts:3c5fbcc6b738cbcece7811cb4d6af10d43665ffb' \
              'frameworks/base:frameworks-base:c8e9a4a21efb16c923371a740b9c1c755d17ebb2' \
              'frameworks/av:frameworks-av:b6b36c1fdb3c6ffced822a054fbf035b544f0de2' \
              'frameworks/opt/telephony:frameworks-opt-telephony:566e62daf4e93be6f934001bc76d60aba087b4d6' \
@@ -81,6 +85,7 @@ for entry in 'system/core:system-core:0e96ff13d90df568ddd788bb02b3ddb6e3641528' 
              'system/memory/libmeminfo:libmeminfo:49326ec942a00db8994f2dc69796ea28c99643e1' \
              'build/make:build-make:e5aaa62172df0f321e68133fa30f42316376bfe8' \
              'hardware/samsung:hardware-samsung:48d217b79df26e3cbdbcb2195a61586e2ee9b96d' \
+             'hardware/broadcom/wlan:broadcom-wifi:f347e286cd515b5afc16926d03d159273439719e' \
              'hardware/samsung_slsi-linaro/graphics:graphics:4f4788272364009a06132f9b2b62e4a042c2ea0a' \
              'build/blueprint:build-blueprint:c39c8a4c103f1393f015a5befa7726f0c14c9bc2' \
              'build/soong:build-soong:9aa045a2aef10b8089e32e847fed26d9aa3d61be' \

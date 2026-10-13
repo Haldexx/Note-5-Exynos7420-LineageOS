@@ -1,0 +1,471 @@
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -672,7 +672,11 @@
+         }
+     }
+ 
++    private var note5VideoStabilizer: org.lineageos.aperture.stabilization.Note5VideoStabilizer? = null
++
+     override fun onDestroy() {
++        note5VideoStabilizer?.close()
++        note5VideoStabilizer = null
+         // Detach CameraController from ScreenFlashView
+         screenFlashView.setController(null)
+ 
+@@ -1705,8 +1709,29 @@
+         viewModel.cameraController.cameraSelector = cameraSelector
+         viewModel.cameraController.setEnabledUseCases(cameraUseCases)
+ 
++        // The legacy Note5 HAL has no working digital stabilization mode. Process
++        // residual image translation once, sharing the result between preview and video.
+         val note5Rear = android.os.Build.HARDWARE == "samsungexynos7420" &&
+             cameraConfiguration.camera.cameraId == "0"
++        val note5Vdis = note5Rear && cameraConfiguration is CameraConfiguration.Video &&
++            cameraConfiguration.enableVideoStabilization &&
++            (cameraConfiguration.videoFrameRate?.value ?: 30) <= 60 &&
++            cameraConfiguration.videoQuality in setOf(Quality.FHD, Quality.HD)
++        // StreamSharing otherwise chooses 2048x1152, beyond the legacy 60 FPS
++        // sensor/LUT limits. Keep the shared input inside the tested video sizes.
++        viewModel.cameraController.previewResolutionSelector = if (note5Vdis)
++            ResolutionSelector.Builder()
++                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
++                .setResolutionFilter { sizes, _ ->
++                    sizes.filter { it.width <= 1920 && it.height <= 1080 }
++                }
++                .build()
++            else null
++        viewModel.cameraController.clearEffects()
++        note5VideoStabilizer?.close()
++        note5VideoStabilizer = if (note5Vdis)
++            org.lineageos.aperture.stabilization.Note5VideoStabilizer() else null
++        note5VideoStabilizer?.let { viewModel.cameraController.setEffects(setOf(it)) }
+ 
+         // Bind camera controller to lifecycle
+         viewModel.cameraController.bindToLifecycle(this)
+diff --git a/app/Android.bp b/app/Android.bp
+--- a/app/Android.bp
++++ b/app/Android.bp
+@@ -10,7 +10,7 @@
+ android_app {
+     name: "Aperture",
+ 
+-    srcs: ["src/main/java/**/*.kt"],
++    srcs: ["src/main/java/**/*.kt", "src/main/java/**/*.java"],
+     resource_dirs: ["src/main/res"],
+     manifest: "src/main/AndroidManifest.xml",
+ 
+diff --git a/app/src/main/java/org/lineageos/aperture/stabilization/Note5MotionFilter.java b/app/src/main/java/org/lineageos/aperture/stabilization/Note5MotionFilter.java
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/org/lineageos/aperture/stabilization/Note5MotionFilter.java
+@@ -0,0 +1,122 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package org.lineageos.aperture.stabilization;
++
++import java.util.Arrays;
++
++/** Frame-derived VDIS: smooth global translation, preserving slow pans.
++ * Input is a tiny luminance image; full camera images are never retained here.
++ */
++public final class Note5MotionFilter {
++    public static final int WIDTH = 160, HEIGHT = 90;
++    public static final float CROP = 0.84f;
++    private byte[] previous;
++    private long previousTime;
++    private double pathX, pathY, smoothX, smoothY;
++    private final double[] dx = new double[9], dy = new double[9];
++    private float offsetX, offsetY;
++    private int matched;
++
++    public void reset() {
++        previous = null;
++        previousTime = 0;
++        pathX = pathY = smoothX = smoothY = 0;
++        offsetX = offsetY = 0;
++        matched = 0;
++    }
++
++    public void update(byte[] frame, long timestamp) {
++        if (frame.length != WIDTH * HEIGHT) throw new IllegalArgumentException("luma size");
++        long delta = timestamp - previousTime;
++        if (previous == null || delta <= 0 || delta > 200_000_000L) {
++            reset(); remember(frame, timestamp); return;
++        }
++        int count = 0;
++        // A moving subject must not drive stabilization: require agreement among background tiles.
++        int[][] centers = {{30,20},{80,20},{130,20},{30,45},{80,45},{130,45},{30,70},{80,70},{130,70}};
++        for (int[] c : centers) {
++            int x = c[0], y = c[1];
++            int sum = 0, square = 0;
++            for (int yy=-5; yy<=5; yy++) for (int xx=-5; xx<=5; xx++) {
++                int value = previous[(y+yy)*WIDTH+x+xx] & 255;
++                sum += value; square += value*value;
++            }
++            if (square / 121.0 - Math.pow(sum / 121.0, 2) < 60) continue;
++            double best = Double.MAX_VALUE, runner = Double.MAX_VALUE;
++            int bestX=0, bestY=0;
++            for (int sy=-6; sy<=6; sy++) for (int sx=-6; sx<=6; sx++) {
++                double error=score(previous,frame,x,y,sx,sy);
++                if (error < best) { runner=best; best=error; bestX=sx; bestY=sy; }
++                else if (error < runner) runner=error;
++            }
++            // Reject scene cuts, ambiguous matches and motion beyond our search window.
++            if (best > 30 || runner-best < 0.35 || Math.abs(bestX)==6 || Math.abs(bestY)==6)
++                continue;
++            double[] fine=refine(previous,frame,x,y,bestX,bestY);
++            dx[count]=bestX+fine[0];dy[count]=bestY+fine[1];
++            count++;
++        }
++        double mx=0,my=0;
++        matched=0;
++        if (count>=3) {
++            double[] sortedX=Arrays.copyOf(dx,count),sortedY=Arrays.copyOf(dy,count);
++            Arrays.sort(sortedX);Arrays.sort(sortedY);
++            double medianX=sortedX[count/2],medianY=sortedY[count/2];
++            for(int i=0;i<count;i++)
++                if(Math.abs(dx[i]-medianX)<=1 && Math.abs(dy[i]-medianY)<=1) matched++;
++            if(matched>=3) { mx=medianX;my=medianY; }
++        }
++        // Ignore subpixel estimator noise; OIS already handles these tiny movements.
++        if(Math.abs(mx)<0.08) mx=0;
++        if(Math.abs(my)<0.08) my=0;
++        // Keep the same trajectory when confidence falls. Resetting it before
++        // reacquisition would make the crop jump back toward the center.
++        pathX+=mx;pathY+=my;
++        double alpha=1-Math.exp(-delta/220_000_000.0);
++        smoothX+=alpha*(pathX-smoothX);smoothY+=alpha*(pathY-smoothY);
++        float margin=(1-CROP)/2-0.002f;
++        offsetX=clamp((float)((pathX-smoothX)/WIDTH),margin);
++        offsetY=clamp((float)((pathY-smoothY)/HEIGHT),margin);
++        // Anti-windup: a long pan cannot store a hidden correction outside the crop.
++        pathX=offsetX*WIDTH;pathY=offsetY*HEIGHT;smoothX=smoothY=0;
++        remember(frame,timestamp);
++    }
++    private static double score(byte[] previous,byte[] frame,int x,int y,int sx,int sy) {
++        // Exposure/HDR changes must not masquerade as motion.
++        int change=0;
++        for(int yy=-5;yy<=5;yy+=2) for(int xx=-5;xx<=5;xx+=2)
++            change+=(frame[(y+yy+sy)*WIDTH+x+xx+sx]&255)-(previous[(y+yy)*WIDTH+x+xx]&255);
++        double mean=change/36.0,error=0;
++        for(int yy=-5;yy<=5;yy+=2) for(int xx=-5;xx<=5;xx+=2)
++            error+=Math.abs((frame[(y+yy+sy)*WIDTH+x+xx+sx]&255)
++                    -(previous[(y+yy)*WIDTH+x+xx]&255)-mean);
++        return error/36;
++    }
++    private static double[] refine(byte[] previous,byte[] frame,int x,int y,int sx,int sy) {
++        // Small-motion least-squares refinement, rather than fitting a parabola
++        // to absolute errors (which biased fine motion toward zero).
++        double mean=0;
++        for(int yy=-5;yy<=5;yy++) for(int xx=-5;xx<=5;xx++)
++            mean+=(previous[(y+yy)*WIDTH+x+xx]&255)-(frame[(y+yy+sy)*WIDTH+x+xx+sx]&255);
++        mean/=121;
++        double axx=0,ayy=0,axy=0,bx=0,by=0;
++        for(int yy=-5;yy<=5;yy++) for(int xx=-5;xx<=5;xx++) {
++            int at=(y+yy+sy)*WIDTH+x+xx+sx;
++            double gx=((frame[at+1]&255)-(frame[at-1]&255))/2.0;
++            double gy=((frame[at+WIDTH]&255)-(frame[at-WIDTH]&255))/2.0;
++            double residual=(previous[(y+yy)*WIDTH+x+xx]&255)-(frame[at]&255)-mean;
++            axx+=gx*gx;ayy+=gy*gy;axy+=gx*gy;bx+=gx*residual;by+=gy*residual;
++        }
++        double determinant=axx*ayy-axy*axy;
++        if(determinant<100) return new double[]{0,0};
++        return new double[]{Math.max(-0.5,Math.min(0.5,(ayy*bx-axy*by)/determinant)),
++                Math.max(-0.5,Math.min(0.5,(axx*by-axy*bx)/determinant))};
++    }
++    private static float clamp(float x,float bound) { return Math.max(-bound,Math.min(bound,x)); }
++    private void remember(byte[] frame,long time) {
++        if (previous==null) previous=new byte[frame.length];
++        System.arraycopy(frame,0,previous,0,frame.length); previousTime=time;
++    }
++    public float getOffsetX() { return offsetX; }
++    public float getOffsetY() { return offsetY; }
++    public int getMatchedTiles() { return matched; }
++}
+diff --git a/app/src/main/java/org/lineageos/aperture/stabilization/Note5VideoStabilizer.java b/app/src/main/java/org/lineageos/aperture/stabilization/Note5VideoStabilizer.java
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/org/lineageos/aperture/stabilization/Note5VideoStabilizer.java
+@@ -0,0 +1,282 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package org.lineageos.aperture.stabilization;
++
++import android.graphics.SurfaceTexture;
++import android.opengl.EGL14;
++import android.opengl.EGLConfig;
++import android.opengl.EGLContext;
++import android.opengl.EGLDisplay;
++import android.opengl.EGLExt;
++import android.opengl.EGLSurface;
++import android.opengl.GLES11Ext;
++import android.opengl.GLES20;
++import android.opengl.Matrix;
++import android.os.Handler;
++import android.os.HandlerThread;
++import android.util.Log;
++import android.view.Surface;
++import androidx.annotation.NonNull;
++import androidx.camera.core.CameraEffect;
++import androidx.camera.core.ProcessingException;
++import androidx.camera.core.SurfaceOutput;
++import androidx.camera.core.SurfaceProcessor;
++import androidx.camera.core.SurfaceRequest;
++import java.nio.ByteBuffer;
++import java.nio.ByteOrder;
++import java.nio.FloatBuffer;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.Map;
++import java.util.concurrent.Executor;
++
++/** CameraX frame-derived VDIS for the Note5 rear camera, 720p/1080p <=60 FPS.
++ * Optical stabilization remains in the HAL; this corrects residual translation.
++ * The same transformed frame feeds preview and encoder. No images leave the device.
++ */
++public final class Note5VideoStabilizer extends CameraEffect implements AutoCloseable {
++    private final Processor processor;
++    public Note5VideoStabilizer() { this(new Processor()); }
++    private Note5VideoStabilizer(Processor processor) {
++        super(PREVIEW | VIDEO_CAPTURE, OUTPUT_OPTION_ONE_FOR_EACH_TARGET,
++                TRANSFORMATION_ARBITRARY, processor.executor, processor,
++                error -> Log.e("Note5VDIS", "Camera effect failed", error));
++        this.processor=processor;
++    }
++    @Override public void close() { processor.executor.execute(processor::shutdown); }
++
++    private static final class Input {
++        final int texture;
++        final SurfaceRequest request;
++        final SurfaceTexture source;
++        final Surface surface;
++        Input(int texture,SurfaceTexture source,SurfaceRequest request) {
++            this.texture=texture;this.source=source;this.request=request;surface=new Surface(source);
++        }
++    }
++    private static final class Output {
++        final EGLSurface egl;
++        final float[] transform=new float[16];
++        Output(EGLSurface egl) { this.egl=egl; }
++    }
++    private static final class Processor implements SurfaceProcessor {
++        final HandlerThread thread=new HandlerThread("Note5VDIS");
++        final Handler handler;
++        final Executor executor;
++        final Note5MotionFilter motion=new Note5MotionFilter();
++        final ArrayList<Input> inputs=new ArrayList<>();
++        final Map<SurfaceOutput,Output> outputs=new LinkedHashMap<>();
++        final FloatBuffer vertices=ByteBuffer.allocateDirect(8*4).order(ByteOrder.nativeOrder())
++                .asFloatBuffer();
++        final ByteBuffer pixels=ByteBuffer.allocateDirect(Note5MotionFilter.WIDTH*Note5MotionFilter.HEIGHT*4);
++        final byte[] luma=new byte[Note5MotionFilter.WIDTH*Note5MotionFilter.HEIGHT];
++        final float[] identity=new float[16], textureMatrix=new float[16], cropMatrix=new float[16],
++                temporary=new float[16], composed=new float[16];
++        EGLDisplay display=EGL14.EGL_NO_DISPLAY;
++        EGLContext context=EGL14.EGL_NO_CONTEXT;
++        EGLSurface dummy=EGL14.EGL_NO_SURFACE;
++        EGLConfig config;
++        Input current;
++        int program, positionLocation, matrixLocation, monochromeLocation, framebuffer, analysisTexture;
++        boolean closing, released;
++        long frames, previousTimestamp, firstTimestamp, totalProcessNs, maxProcessNs, correctedFrames;
++        float maxCorrection,renderOffsetX,renderOffsetY;
++        long lastAnalysisTimestamp,analysisFrames;
++        RuntimeException failure;
++        Processor() {
++            thread.start();handler=new Handler(thread.getLooper());
++            executor=command -> handler.post(command);
++            vertices.put(new float[]{-1,-1,1,-1,-1,1,1,1}).position(0);
++            Matrix.setIdentityM(identity,0);
++        }
++        @Override public void onInputSurface(@NonNull SurfaceRequest request) throws ProcessingException {
++            if (failure!=null) {
++                request.willNotProvideSurface();
++                ProcessingException error=new ProcessingException();error.initCause(failure);throw error;
++            }
++            if (closing) { request.willNotProvideSurface();return; }
++            try {
++                initialize();makeCurrent(dummy);
++                int[] ids=new int[1];GLES20.glGenTextures(1,ids,0);
++                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,ids[0]);
++                textureParameters(GLES11Ext.GL_TEXTURE_EXTERNAL_OES);
++                SurfaceTexture source=new SurfaceTexture(ids[0]);
++                source.setDefaultBufferSize(request.getResolution().getWidth(),request.getResolution().getHeight());
++                Input input=new Input(ids[0],source,request);inputs.add(input);current=input;
++                motion.reset();frames=previousTimestamp=firstTimestamp=totalProcessNs=maxProcessNs=correctedFrames=0;maxCorrection=renderOffsetX=renderOffsetY=0;lastAnalysisTimestamp=analysisFrames=0;
++                source.setOnFrameAvailableListener(ignored -> render(input),handler);
++                request.provideSurface(input.surface,executor,result -> releaseInput(input));
++                Log.i("Note5VDIS","input="+request.getResolution()+" crop="+Note5MotionFilter.CROP);
++            } catch (RuntimeException e) {
++                request.willNotProvideSurface();ProcessingException error=new ProcessingException();error.initCause(e);throw error;
++            }
++        }
++        @Override public void onOutputSurface(@NonNull SurfaceOutput output) throws ProcessingException {
++            if (closing) { output.close();return; }
++            try {
++                initialize();
++                Surface surface=output.getSurface(executor,event -> releaseOutput(output));
++                EGLSurface egl=EGL14.eglCreateWindowSurface(display,config,surface,
++                        new int[]{EGL14.EGL_NONE},0);
++                if (egl==EGL14.EGL_NO_SURFACE) throw new IllegalStateException("EGL output "+EGL14.eglGetError());
++                outputs.put(output,new Output(egl));
++            } catch (RuntimeException e) {
++                output.close();ProcessingException error=new ProcessingException();error.initCause(e);throw error;
++            }
++        }
++        void render(Input input) {
++            if (closing || failure!=null || input!=current) return;
++            long processingStart=System.nanoTime();
++            try {
++                makeCurrent(dummy);input.source.updateTexImage();
++                long timestamp=input.source.getTimestamp();
++                if (timestamp<=previousTimestamp) return;
++                long renderDelta=previousTimestamp==0?33_333_333L:timestamp-previousTimestamp;
++                previousTimestamp=timestamp;
++                if (firstTimestamp==0) firstTimestamp=timestamp;
++                input.source.getTransformMatrix(textureMatrix);
++                // GPU readback is the expensive synchronization point. Estimate
++                // movement at <=30 Hz, while rendering every sensor frame at 60 Hz.
++                if(lastAnalysisTimestamp==0 || timestamp-lastAnalysisTimestamp>=30_000_000L) {
++                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER,framebuffer);
++                    draw(input.texture,textureMatrix,Note5MotionFilter.WIDTH,Note5MotionFilter.HEIGHT,true);
++                    pixels.position(0);
++                    GLES20.glReadPixels(0,0,Note5MotionFilter.WIDTH,Note5MotionFilter.HEIGHT,
++                            GLES20.GL_RGBA,GLES20.GL_UNSIGNED_BYTE,pixels);
++                    for(int i=0;i<luma.length;i++) luma[i]=pixels.get(i*4);
++                    motion.update(luma,timestamp);lastAnalysisTimestamp=timestamp;analysisFrames++;
++                }
++                // Ease between estimates, preventing alternating 60 FPS crop steps.
++                float blend=(float)(1-Math.exp(-renderDelta/35_000_000.0));
++                renderOffsetX+=blend*(motion.getOffsetX()-renderOffsetX);
++                renderOffsetY+=blend*(motion.getOffsetY()-renderOffsetY);
++                float correction=Math.abs(renderOffsetX)+Math.abs(renderOffsetY);
++                if(correction>0.0001f) correctedFrames++;
++                maxCorrection=Math.max(maxCorrection,correction);
++                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER,0);
++                Matrix.setIdentityM(cropMatrix,0);
++                cropMatrix[0]=cropMatrix[5]=Note5MotionFilter.CROP;
++                cropMatrix[12]=(1-Note5MotionFilter.CROP)/2+renderOffsetX;
++                cropMatrix[13]=(1-Note5MotionFilter.CROP)/2+renderOffsetY;
++                for (Map.Entry<SurfaceOutput,Output> entry:outputs.entrySet()) {
++                    SurfaceOutput surface=entry.getKey();Output output=entry.getValue();
++                    surface.updateTransformMatrix(output.transform,identity);
++                    Matrix.multiplyMM(temporary,0,cropMatrix,0,output.transform,0);
++                    Matrix.multiplyMM(composed,0,textureMatrix,0,temporary,0);
++                    makeCurrent(output.egl);
++                    EGL14.eglSwapInterval(display,0);
++                    draw(input.texture,composed,surface.getSize().getWidth(),surface.getSize().getHeight(),false);
++                    // Preserve sensor timestamps: stabilization must not change recorded cadence.
++                    EGLExt.eglPresentationTimeANDROID(display,output.egl,timestamp);
++                    if (!EGL14.eglSwapBuffers(display,output.egl))
++                        throw new IllegalStateException("EGL swap "+EGL14.eglGetError());
++                }
++                int glError=GLES20.glGetError();
++                if (glError!=GLES20.GL_NO_ERROR) throw new IllegalStateException("GL error "+glError);
++                long processingNs=System.nanoTime()-processingStart;
++                totalProcessNs+=processingNs;maxProcessNs=Math.max(maxProcessNs,processingNs);
++                if (++frames%90==0) Log.i("Note5VDIS","frames="+frames+" fps="+
++                        ((frames-1)*1e9/(timestamp-firstTimestamp))+" matched="+
++                        motion.getMatchedTiles()+" offset="+motion.getOffsetX()+","+motion.getOffsetY()+
++                        " analysisFrames="+analysisFrames+" correctedFrames="+correctedFrames+" maxCorrection="+maxCorrection+
++                        " processingAvgMs="+(totalProcessNs/frames/1e6)+" maxMs="+(maxProcessNs/1e6));
++            } catch (RuntimeException e) {
++                // Stop this graph on an actual processing failure; never silently claim stabilization.
++                Log.e("Note5VDIS","Rendering failed",e);failure=e;input.request.invalidate();
++            }
++        }
++        void initialize() {
++            if (context!=EGL14.EGL_NO_CONTEXT) return;
++            display=EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
++            int[] version=new int[2];
++            if (!EGL14.eglInitialize(display,version,0,version,1)) throw new IllegalStateException("EGL init");
++            int[] attributes={EGL14.EGL_RED_SIZE,8,EGL14.EGL_GREEN_SIZE,8,EGL14.EGL_BLUE_SIZE,8,
++                    EGL14.EGL_ALPHA_SIZE,8,EGL14.EGL_RENDERABLE_TYPE,EGL14.EGL_OPENGL_ES2_BIT,
++                    EGL14.EGL_SURFACE_TYPE,EGL14.EGL_WINDOW_BIT|EGL14.EGL_PBUFFER_BIT,
++                    0x3142,1,EGL14.EGL_NONE}; // EGL_RECORDABLE_ANDROID
++            EGLConfig[] configs=new EGLConfig[1];int[] count=new int[1];
++            if (!EGL14.eglChooseConfig(display,attributes,0,configs,0,1,count,0)||count[0]==0)
++                throw new IllegalStateException("EGL recordable config");
++            config=configs[0];
++            context=EGL14.eglCreateContext(display,config,EGL14.EGL_NO_CONTEXT,
++                    new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION,2,EGL14.EGL_NONE},0);
++            dummy=EGL14.eglCreatePbufferSurface(display,config,
++                    new int[]{EGL14.EGL_WIDTH,1,EGL14.EGL_HEIGHT,1,EGL14.EGL_NONE},0);
++            makeCurrent(dummy);
++            int vertex=shader(GLES20.GL_VERTEX_SHADER,"attribute vec2 aPosition; uniform mat4 uMatrix; varying vec2 vTex; void main(){gl_Position=vec4(aPosition,0.,1.);vTex=(uMatrix*vec4((aPosition+1.)*.5,0.,1.)).xy;}");
++            int fragment=shader(GLES20.GL_FRAGMENT_SHADER,"#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 vTex; uniform samplerExternalOES uTexture; uniform bool uMono; void main(){vec4 c=texture2D(uTexture,vTex); float y=dot(c.rgb,vec3(.299,.587,.114));gl_FragColor=uMono?vec4(y,y,y,1.):c;}");
++            program=GLES20.glCreateProgram();GLES20.glAttachShader(program,vertex);GLES20.glAttachShader(program,fragment);
++            GLES20.glLinkProgram(program);int[] ok=new int[1];GLES20.glGetProgramiv(program,GLES20.GL_LINK_STATUS,ok,0);
++            GLES20.glDeleteShader(vertex);GLES20.glDeleteShader(fragment);
++            if (ok[0]==0) throw new IllegalStateException(GLES20.glGetProgramInfoLog(program));
++            positionLocation=GLES20.glGetAttribLocation(program,"aPosition");
++            matrixLocation=GLES20.glGetUniformLocation(program,"uMatrix");
++            monochromeLocation=GLES20.glGetUniformLocation(program,"uMono");
++            int[] id=new int[1];GLES20.glGenTextures(1,id,0);analysisTexture=id[0];
++            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,analysisTexture);textureParameters(GLES20.GL_TEXTURE_2D);
++            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D,0,GLES20.GL_RGBA,Note5MotionFilter.WIDTH,
++                    Note5MotionFilter.HEIGHT,0,GLES20.GL_RGBA,GLES20.GL_UNSIGNED_BYTE,null);
++            GLES20.glGenFramebuffers(1,id,0);framebuffer=id[0];GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER,framebuffer);
++            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER,GLES20.GL_COLOR_ATTACHMENT0,
++                    GLES20.GL_TEXTURE_2D,analysisTexture,0);
++            if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)!=GLES20.GL_FRAMEBUFFER_COMPLETE)
++                throw new IllegalStateException("VDIS framebuffer");
++            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER,0);
++        }
++        static void textureParameters(int target) {
++            GLES20.glTexParameteri(target,GLES20.GL_TEXTURE_MIN_FILTER,GLES20.GL_LINEAR);
++            GLES20.glTexParameteri(target,GLES20.GL_TEXTURE_MAG_FILTER,GLES20.GL_LINEAR);
++            GLES20.glTexParameteri(target,GLES20.GL_TEXTURE_WRAP_S,GLES20.GL_CLAMP_TO_EDGE);
++            GLES20.glTexParameteri(target,GLES20.GL_TEXTURE_WRAP_T,GLES20.GL_CLAMP_TO_EDGE);
++        }
++        static int shader(int type,String text) {
++            int shader=GLES20.glCreateShader(type);GLES20.glShaderSource(shader,text);GLES20.glCompileShader(shader);
++            int[] ok=new int[1];GLES20.glGetShaderiv(shader,GLES20.GL_COMPILE_STATUS,ok,0);
++            if (ok[0]==0) throw new IllegalStateException(GLES20.glGetShaderInfoLog(shader));return shader;
++        }
++        void makeCurrent(EGLSurface surface) {
++            if (!EGL14.eglMakeCurrent(display,surface,surface,context))
++                throw new IllegalStateException("EGL current "+EGL14.eglGetError());
++        }
++        void draw(int texture,float[] matrix,int width,int height,boolean mono) {
++            GLES20.glViewport(0,0,width,height);GLES20.glUseProgram(program);
++            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,texture);
++            GLES20.glUniformMatrix4fv(matrixLocation,1,false,matrix,0);
++            GLES20.glUniform1i(monochromeLocation,mono?1:0);
++            GLES20.glEnableVertexAttribArray(positionLocation);vertices.position(0);
++            GLES20.glVertexAttribPointer(positionLocation,2,GLES20.GL_FLOAT,false,0,vertices);
++            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP,0,4);
++        }
++        void releaseInput(Input input) {
++            if (!inputs.remove(input)) return;
++            makeCurrent(dummy);input.source.setOnFrameAvailableListener(null);input.surface.release();input.source.release();
++            GLES20.glDeleteTextures(1,new int[]{input.texture},0);
++            if (current==input) current=null;
++            finishShutdown();
++        }
++        void releaseOutput(SurfaceOutput surface) {
++            Output output=outputs.remove(surface);
++            if (output!=null) { makeCurrent(dummy);EGL14.eglDestroySurface(display,output.egl); }
++            surface.close();finishShutdown();
++        }
++        void shutdown() {
++            if (closing) return;closing=true;
++            for (SurfaceOutput surface:new ArrayList<>(outputs.keySet())) releaseOutput(surface);
++            finishShutdown();
++        }
++        void finishShutdown() {
++            if (!closing || released || !inputs.isEmpty() || !outputs.isEmpty()) return;
++            released=true;
++            if (display!=EGL14.EGL_NO_DISPLAY) {
++                if (context!=EGL14.EGL_NO_CONTEXT) {
++                    makeCurrent(dummy);GLES20.glDeleteProgram(program);
++                    GLES20.glDeleteFramebuffers(1,new int[]{framebuffer},0);
++                    GLES20.glDeleteTextures(1,new int[]{analysisTexture},0);
++                    EGL14.eglMakeCurrent(display,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_CONTEXT);
++                    EGL14.eglDestroySurface(display,dummy);EGL14.eglDestroyContext(display,context);
++                }
++                EGL14.eglTerminate(display);EGL14.eglReleaseThread();
++            }
++            motion.reset();thread.quitSafely();
++        }
++    }
++}

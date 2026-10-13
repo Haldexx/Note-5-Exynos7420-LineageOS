@@ -38,6 +38,11 @@ class PhhMmTelFeature(
 
     private val setupDone = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    @Volatile private var incomingCallId: String? = null
+    private var incomingAccepted: (() -> Unit)? = null
+    private var incomingEnded: ((ImsReasonInfo) -> Unit)? = null
+
+    private var outgoingCallId: String? = null
     private var outgoingListener: ImsCallSessionListener? = null
     private var outgoingStateChanged: ((Int) -> Unit)? = null
 
@@ -111,6 +116,25 @@ class PhhMmTelFeature(
                 Rlog.d(TAG, "Accepting call with callType $callType profile $profile")
             }
 
+            override fun hold(profile: ImsStreamMediaProfile) {
+                sipHandler.myHandler.post {
+                    if (this::mListener.isInitialized) mListener.callSessionHoldFailed(
+                        ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_ILLEGAL_STATE, 0, "IMS hold is not implemented"))
+                }
+            }
+            override fun resume(profile: ImsStreamMediaProfile) {
+                sipHandler.myHandler.post {
+                    if (this::mListener.isInitialized) mListener.callSessionResumeFailed(
+                        ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_ILLEGAL_STATE, 0, "IMS resume is not implemented"))
+                }
+            }
+            override fun merge() {
+                sipHandler.myHandler.post {
+                    if (this::mListener.isInitialized) mListener.callSessionMergeFailed(
+                        ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_ILLEGAL_STATE, 0, "IMS conference is not implemented"))
+                }
+            }
+
             override fun isInCall(): Boolean = mState == State.ESTABLISHED
 
             override fun getCallProfile(): ImsCallProfile = currentProfile
@@ -123,7 +147,7 @@ class PhhMmTelFeature(
                 Rlog.d(TAG, "Starting call with $callee profile $profile")
                 updateCallNetworkType(profile)
                 currentProfile = profile
-                sipHandler.call(callee)
+                sipHandler.call(callee, mCallId)
 
                 sipHandler.myHandler.postDelayed({
                     if (mState == State.INITIATED) {
@@ -138,6 +162,7 @@ class PhhMmTelFeature(
             override fun setListener(listener: ImsCallSessionListener) {
                 Rlog.d(TAG, "Setting CallListener to $listener")
                 mListener = listener
+                outgoingCallId = mCallId
                 outgoingListener = listener
                 outgoingStateChanged = { mState = it }
             }
@@ -191,6 +216,11 @@ class PhhMmTelFeature(
                         ImsStreamMediaProfile.RTT_MODE_DISABLED,
                     ),
                 )
+                // Report the call's network type (WiFi vs LTE) as soon as it is progressing so the
+                // VoWiFi indicator appears while placing/ringing, not only once connected. This is
+                // an ignoreState update, so it refreshes the RAT without changing the call state.
+                updateCallNetworkType(session.currentProfile)
+                session.mListener.callSessionUpdated(session.currentProfile)
             }
             sipHandler.onOutgoingCallConnected = { _: Object, _: Map<String, String> ->
                 Rlog.d(TAG, "Outgoing call connected")
@@ -208,9 +238,9 @@ class PhhMmTelFeature(
                             ImsStreamMediaProfile.RTT_MODE_DISABLED,
                         ),
                     )
-                callProfile.setCallExtraInt(ImsCallProfile.EXTRA_CALL_NETWORK_TYPE,
-                    session.currentProfile.getCallExtraInt(ImsCallProfile.EXTRA_CALL_NETWORK_TYPE,
-                        TelephonyManager.NETWORK_TYPE_UNKNOWN))
+                // Re-evaluate the transport at connect so a WiFi->LTE fallback during setup is
+                // reflected (the VoWiFi indicator is removed if the call ended up on VoLTE).
+                updateCallNetworkType(callProfile)
                 session.currentProfile = callProfile
                 session.mListener.callSessionInitiated(callProfile)
             }
@@ -255,24 +285,23 @@ class PhhMmTelFeature(
         sipHandler.onSmsReceived = imsSms::onSmsReceived
         sipHandler.onSmsStatusReportReceived = imsSms::onSmsStatusReportReceived
 
-        var callListener: ImsCallSessionListener? = null
-        sipHandler.onIncomingCall = { handle: Object, from: String, extras: Map<String, String> ->
-            outgoingListener = null
-            outgoingStateChanged = null
-            val callProfile =
-                ImsCallProfile(
-                    ImsCallProfile.SERVICE_TYPE_NORMAL,
-                    ImsCallProfile.CALL_TYPE_VOICE,
-                    Bundle(),
-                    ImsStreamMediaProfile(
-                        ImsStreamMediaProfile.AUDIO_QUALITY_AMR,
-                        ImsStreamMediaProfile.DIRECTION_SEND_RECEIVE,
-                        ImsStreamMediaProfile.VIDEO_QUALITY_NONE,
-                        ImsStreamMediaProfile.DIRECTION_INACTIVE,
-                        ImsStreamMediaProfile.RTT_MODE_DISABLED,
-                    ),
-                )
-
+        sipHandler.onIncomingCallAccepted = { callId ->
+            sipHandler.myHandler.post {
+                if (incomingCallId == callId) incomingAccepted?.invoke()
+            }
+        }
+        sipHandler.onIncomingCall = incoming@{ _: Object, from: String, extras: Map<String, String> ->
+            val callId = extras["call-id"] ?: return@incoming
+            val callProfile = ImsCallProfile(
+                ImsCallProfile.SERVICE_TYPE_NORMAL, ImsCallProfile.CALL_TYPE_VOICE,
+                Bundle(), ImsStreamMediaProfile(
+                    ImsStreamMediaProfile.AUDIO_QUALITY_AMR,
+                    ImsStreamMediaProfile.DIRECTION_SEND_RECEIVE,
+                    ImsStreamMediaProfile.VIDEO_QUALITY_NONE,
+                    ImsStreamMediaProfile.DIRECTION_INACTIVE,
+                    ImsStreamMediaProfile.RTT_MODE_DISABLED,
+                ),
+            )
             updateCallNetworkType(callProfile)
             callProfile.setCallExtra(ImsCallProfile.EXTRA_OI, from)
             callProfile.setCallExtra(ImsCallProfile.EXTRA_DISPLAY_TEXT, from)
@@ -282,96 +311,116 @@ class PhhMmTelFeature(
                 else -> ImsCallProfile.OIR_PRESENTATION_UNKNOWN
             }
             callProfile.setCallExtraInt(ImsCallProfile.EXTRA_OIR, oir)
-            Rlog.d(TAG, "Incoming caller OIR=$oir")
-            notifyIncomingCall(
-                object : ImsCallSessionImplBase() {
-                    var mState = State.IDLE
+            val session = object : ImsCallSessionImplBase() {
+                @Volatile var mState = State.INITIATED
+                private var listener: ImsCallSessionListener? = null
+                private var connectedNotified = false
+                private var terminalNotified = false
+                private var terminalReason: ImsReasonInfo? = null
 
-                    override fun getCallProfile(): ImsCallProfile = callProfile
-
-                    override fun setListener(listener: ImsCallSessionListener) {
-                        Rlog.d(TAG, "Setting CallListener to $listener")
-                        callListener = listener
+                fun notifyAccepted() {
+                    if (mState == State.TERMINATED) return
+                    mState = State.ESTABLISHED
+                    val target = listener ?: return
+                    if (!connectedNotified) {
+                        connectedNotified = true
+                        target.callSessionInitiated(callProfile)
                     }
-
-                    override fun getCallId(): String = extras["call-id"]!!
-
-                    override fun getLocalCallProfile(): ImsCallProfile = callProfile
-
-                    override fun getRemoteCallProfile(): ImsCallProfile = callProfile
-
-                    override fun getProperty(name: String): String {
-                        Rlog.d(TAG, "ImsCallSession.getProperty " + name)
-                        return ""
+                }
+                fun notifyEnded(reason: ImsReasonInfo) {
+                    mState = State.TERMINATED
+                    terminalReason = reason
+                    val target = listener ?: return
+                    if (!terminalNotified) {
+                        terminalNotified = true
+                        target.callSessionTerminated(reason)
                     }
-
-                    override fun getState(): Int = mState
-
-                    override fun start(
-                        callee: String,
-                        profile: ImsCallProfile,
-                    ) {
-                        Rlog.d(TAG, "Starting call with $callee")
+                }
+                override fun getCallId(): String = callId
+                override fun getState(): Int = mState
+                override fun hold(profile: ImsStreamMediaProfile) {
+                    sipHandler.myHandler.post { listener?.callSessionHoldFailed(
+                        ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_ILLEGAL_STATE, 0, "IMS hold is not implemented")) }
+                }
+                override fun resume(profile: ImsStreamMediaProfile) {
+                    sipHandler.myHandler.post { listener?.callSessionResumeFailed(
+                        ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_ILLEGAL_STATE, 0, "IMS resume is not implemented")) }
+                }
+                override fun merge() {
+                    sipHandler.myHandler.post { listener?.callSessionMergeFailed(
+                        ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_ILLEGAL_STATE, 0, "IMS conference is not implemented")) }
+                }
+                override fun isInCall(): Boolean = mState == State.ESTABLISHED
+                override fun getCallProfile(): ImsCallProfile = callProfile
+                override fun getLocalCallProfile(): ImsCallProfile = callProfile
+                override fun getRemoteCallProfile(): ImsCallProfile = callProfile
+                override fun setListener(target: ImsCallSessionListener) {
+                    sipHandler.myHandler.post {
+                        if (listener !== target) {
+                            connectedNotified = false
+                            terminalNotified = false
+                        }
+                        listener = target
+                        if (mState == State.ESTABLISHED) notifyAccepted()
+                        terminalReason?.let(::notifyEnded)
                     }
-
-                    override fun accept(
-                        callType: Int,
-                        profile: ImsStreamMediaProfile,
-                    ) {
-                        Rlog.d(TAG, "Accepting call with profile $profile")
-                        sipHandler.acceptCall()
-                        mState = State.ESTABLISHED
-                        callListener?.callSessionInitiated(callProfile)
+                }
+                override fun accept(callType: Int, profile: ImsStreamMediaProfile) {
+                    sipHandler.myHandler.post {
+                        if (mState == State.TERMINATED || mState == State.ESTABLISHED || incomingCallId != callId) return@post
+                        if (sipHandler.acceptCall(callId)) mState = State.ESTABLISHING
                     }
-
-                    override fun deflect(deflectNumber: String?) {
-                        Rlog.d(TAG, "Deflecting call to $deflectNumber")
+                }
+                override fun reject(reason: Int) {
+                    sipHandler.myHandler.post {
+                        if (mState == State.TERMINATED || incomingCallId != callId) return@post
+                        try { sipHandler.rejectCall(callId) }
+                        catch (e: Exception) { Rlog.w(TAG, "Incoming rejection failed", e) }
+                        finally { notifyEnded(ImsReasonInfo(ImsReasonInfo.CODE_USER_DECLINE, 0, "Declined")) }
                     }
-
-                    override fun reject(reason: Int) {
-                        sipHandler.rejectCall()
-                        Rlog.d(TAG, "Rejecting call $reason")
-                    }
-
-                    override fun terminate(reason: Int) {
-                        Rlog.d(TAG, "Terminating call")
-                        sipHandler.myHandler.post {
-                            try {
-                                sipHandler.terminateCall()
-                            } catch (t: Throwable) {
-                                Rlog.w(TAG, "terminateCall() failed, reporting the call ended anyway", t)
-                            } finally {
-                                callListener?.callSessionTerminated(
-                                    ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED, 0, "Kikoo"))
+                }
+                override fun terminate(reason: Int) {
+                    sipHandler.myHandler.post {
+                        if (mState == State.TERMINATED || incomingCallId != callId) return@post
+                        try { sipHandler.terminateCall(callId) }
+                        catch (e: Exception) { Rlog.w(TAG, "Incoming termination failed", e) }
+                        finally {
+                            notifyEnded(ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED, 0, "Local ended call"))
+                            if (incomingCallId == callId) {
+                                incomingCallId = null
+                                incomingAccepted = null
+                                incomingEnded = null
                             }
                         }
                     }
-                },
-                Bundle(),
-            )
-        }
-        sipHandler.onCancelledCall = { param: Object, s: String, map: Map<String, String> ->
-            Rlog.d(TAG, "Cancelling call")
-            val outgoing = outgoingListener
-            if (outgoing != null) {
-                outgoingStateChanged?.invoke(ImsCallSessionImplBase.State.TERMINATED)
-                outgoingListener = null
-                outgoingStateChanged = null
-                outgoing.callSessionTerminated(ImsReasonInfo(
-                    ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, 0, "Remote ended call"))
+                }
             }
-            val statusCode = map["statusCode"]?.toInt() ?: -1
-            if (statusCode >= 400) {
-                val statusMessage = map["statusString"] ?: "Kikoo"
-                callListener?.callSessionTerminated(ImsReasonInfo(ImsReasonInfo.CODE_NETWORK_REJECT, 0, statusMessage))
-            } else {
-                callListener?.callSessionTerminated(
-                    ImsReasonInfo(
-                        ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE,
-                        0,
-                        "Kikoo",
-                    ),
-                )
+            incomingCallId = callId
+            incomingAccepted = session::notifyAccepted
+            incomingEnded = session::notifyEnded
+            notifyIncomingCall(session, Bundle())
+        }
+        sipHandler.onCancelledCall = { _: Object, _: String, extras: Map<String, String> ->
+            sipHandler.myHandler.post {
+                val status = extras["statusCode"]?.toIntOrNull() ?: -1
+                val reason = if (status >= 400)
+                    ImsReasonInfo(ImsReasonInfo.CODE_NETWORK_REJECT, status, extras["statusString"] ?: "SIP call failed")
+                    else ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, 0, "Remote ended call")
+                val id = extras["call-id"]
+                if (incomingCallId != null) {
+                    if (id != null && id != incomingCallId) return@post
+                    incomingEnded?.invoke(reason)
+                    incomingCallId = null
+                    incomingAccepted = null
+                    incomingEnded = null
+                } else {
+                    if (id != null && id != outgoingCallId) return@post
+                    val outgoing = outgoingListener ?: return@post
+                    outgoingStateChanged?.invoke(ImsCallSessionImplBase.State.TERMINATED)
+                    outgoingListener = null
+                    outgoingStateChanged = null
+                    outgoing.callSessionTerminated(reason)
+                }
             }
         }
 

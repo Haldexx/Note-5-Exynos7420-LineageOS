@@ -1,0 +1,77 @@
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -162,14 +162,22 @@
+     private val liveHdrButton by lazy { findViewById<Button>(R.id.liveHdrButton) }
+     private val liveHdrPreferences by lazy { getSharedPreferences("live_hdr", MODE_PRIVATE) }
+     private var liveHdrCameraSupported = false
++    private var liveHdrAvailable = false
+     private var closingCameraInfo: androidx.camera.core.CameraInfo? = null
+     private val liveHdrKey = CaptureRequest.Key(
+         "samsung.android.control.liveHdrLevel", Int::class.javaObjectType
+     )
+ 
+     private fun updateLiveHdrButton() {
+-        val enabled = liveHdrPreferences.getBoolean("enabled", false)
+-        liveHdrButton.setText(if (enabled) R.string.live_hdr_on else R.string.live_hdr_off)
++        val enabled = liveHdrAvailable && liveHdrPreferences.getBoolean("enabled", false)
++        liveHdrButton.isEnabled = liveHdrAvailable && viewModel.cameraState.value == CameraState.IDLE
++        liveHdrButton.setText(when {
++            !liveHdrAvailable -> R.string.live_hdr_unavailable_high_fps
++            enabled -> R.string.live_hdr_on
++            else -> R.string.live_hdr_off
++        })
++        liveHdrButton.contentDescription = if (liveHdrAvailable) liveHdrButton.text else
++            getString(R.string.live_hdr_high_fps_reason)
+         liveHdrButton.setCompoundDrawablesWithIntrinsicBounds(
+             0, if (enabled) R.drawable.ic_hdr_on else R.drawable.ic_hdr_off, 0, 0
+         )
+@@ -455,7 +463,7 @@
+         videoDynamicRangeButton.setOnClickListener { viewModel.cycleVideoDynamicRange() }
+         effectButton.setOnClickListener { viewModel.cycleExtensionMode() }
+         liveHdrButton.setOnClickListener {
+-            if (liveHdrCameraSupported && viewModel.cameraState.value == CameraState.IDLE) {
++            if (liveHdrAvailable && viewModel.cameraState.value == CameraState.IDLE) {
+                 val enabled = !liveHdrPreferences.getBoolean("enabled", false)
+                 liveHdrPreferences.edit().putBoolean("enabled", enabled).apply()
+                 viewModel.cameraController.camera2CameraControl?.addCaptureRequestOptions(
+@@ -902,7 +910,7 @@
+                 timerButton.isEnabled = cameraState == CameraState.IDLE
+                 aspectRatioButton.isEnabled = cameraState == CameraState.IDLE
+                 effectButton.isEnabled = cameraState == CameraState.IDLE
+-                liveHdrButton.isEnabled = cameraState == CameraState.IDLE
++                liveHdrButton.isEnabled = liveHdrAvailable && cameraState == CameraState.IDLE
+                 settingsButton.isEnabled = cameraState == CameraState.IDLE
+ 
+                 lensSelectorLayout.setCameraState(cameraState)
+@@ -1494,6 +1502,11 @@
+ 
+         liveHdrCameraSupported = cameraConfiguration.camera.supportsSamsungLiveHdr &&
+                 cameraConfiguration.cameraMode != CameraMode.QR
++        // Samsung Live HDR can leave the high-speed viewfinder black even while
++        // encoder frames are delivered. Preserve the preference for normal rates.
++        liveHdrAvailable = liveHdrCameraSupported &&
++                !(cameraConfiguration is CameraConfiguration.Video &&
++                        (cameraConfiguration.videoFrameRate?.value ?: 0) > 30)
+         liveHdrButton.isVisible = liveHdrCameraSupported
+         updateLiveHdrButton()
+ 
+@@ -1716,7 +1729,7 @@
+                     if (cameraConfiguration.camera.supportsSamsungLiveHdr) {
+                         setCaptureRequestOption(
+                             liveHdrKey,
+-                            if (cameraConfiguration.cameraMode != CameraMode.QR &&
++                            if (liveHdrAvailable &&
+                                 liveHdrPreferences.getBoolean("enabled", false)) 1 else 0
+                         )
+                     }
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -253,4 +253,6 @@
+     <string name="video_mirror_mode_on_ffc_only">Front facing camera only</string>
+     <string name="live_hdr_off">Live HDR off</string>
+     <string name="live_hdr_on">Live HDR on</string>
++    <string name="live_hdr_unavailable_high_fps">HDR ≤30 FPS</string>
++    <string name="live_hdr_high_fps_reason">Live HDR is unavailable above 30 FPS</string>
+ </resources>

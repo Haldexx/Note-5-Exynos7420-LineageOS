@@ -1,0 +1,54 @@
+diff --git a/libshims/libexynoscamera/CameraParameters.cpp b/libshims/libexynoscamera/CameraParameters.cpp
+--- a/libshims/libexynoscamera/CameraParameters.cpp
++++ b/libshims/libexynoscamera/CameraParameters.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "CameraParameters.h"
++#include "LegacyFenceCompat.h"
+ #include <string>
+ #include <ui/GraphicBuffer.h>
+ 
+diff --git a/libshims/libexynoscamera/LegacyFenceCompat.h b/libshims/libexynoscamera/LegacyFenceCompat.h
+new file mode 100644
+--- /dev/null
++++ b/libshims/libexynoscamera/LegacyFenceCompat.h
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++#ifndef NOTE5_LEGACY_FENCE_COMPAT_H
++#define NOTE5_LEGACY_FENCE_COMPAT_H
++#include <cstddef>
++#include <cstdint>
++#include <cerrno>
++#include <poll.h>
++#include <unistd.h>
++
++// Samsung's old camera blobs allocate eight bytes and inline LightRefBase's
++// reference count at offset zero. Never substitute the modern virtual Fence.
++// Only camera imports renamed to this private namespace use these symbols.
++namespace n5cam42 {
++struct __attribute__((visibility("default"))) Fence {
++    int32_t refCount;
++    int fenceFd;
++    explicit Fence(int fd);
++    ~Fence();
++    int wait(int timeout);
++};
++static_assert(sizeof(Fence)==8,"Legacy camera Fence ABI must remain eight bytes");
++static_assert(offsetof(Fence,refCount)==0 && offsetof(Fence,fenceFd)==4,"Legacy field layout");
++Fence::Fence(int fd):refCount(0),fenceFd(fd) {}
++Fence::~Fence() {
++    if(fenceFd>=0) { int owned=fenceFd;fenceFd=-1;close(owned); }
++}
++int Fence::wait(int timeout) {
++    if(fenceFd<0) return 0;
++    pollfd descriptor={fenceFd,POLLIN,0};
++    int result;
++    do { result=poll(&descriptor,1,timeout); } while(result<0 && (errno==EINTR || errno==EAGAIN));
++    if(result<0) return -errno;
++    if(result==0) return -ETIME;
++    if(descriptor.revents&(POLLERR|POLLNVAL)) return -EINVAL;
++    return 0;
++}
++}
++#endif

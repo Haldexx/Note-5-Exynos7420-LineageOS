@@ -1,0 +1,77 @@
+From: Haldexx <https://github.com/Haldexx>
+Subject: [PATCH] aperture: pin preview to the video size in high-speed video
+
+EXPERIMENTAL / partial. On the Exynos 7420 a high-speed (60 fps) session needs the
+preview and video streams to be the same size, and the preview must be 16:9 1920x1080
+for the sensor to enter the correct binned high-speed mode. This pins the preview
+resolution to the video size while a > 30 fps rate is selected. It makes 60 fps
+RECORDING configure cleanly (correct sensor binning), but does NOT fix the black
+viewfinder: the high-speed HAL does not feed the preview/display stream. See
+reports/n920i-camera-60fps-preview-black-2026-10-12.md.
+
+---
+ app/src/main/java/org/lineageos/aperture/CameraActivity.kt | 36 +++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -49,6 +49,7 @@
+ import androidx.camera.core.MirrorMode
+ import androidx.camera.core.resolutionselector.AspectRatioStrategy
+ import androidx.camera.core.resolutionselector.ResolutionSelector
++import androidx.camera.core.resolutionselector.ResolutionStrategy
+ import androidx.camera.extensions.ExtensionMode
+ import androidx.camera.video.Quality
+ import androidx.camera.video.QualitySelector
+@@ -1485,6 +1486,17 @@
+     }
+ 
+     /**
++     * The native high-speed stream size for a given video [Quality]. High-speed sessions require
++     * the preview and video streams to be the same size, so the preview is pinned to this.
++     */
++    private fun highSpeedPreviewSize(quality: Quality) = when (quality) {
++        Quality.UHD -> android.util.Size(3840, 2160)
++        Quality.HD -> android.util.Size(1280, 720)
++        Quality.SD -> android.util.Size(720, 480)
++        else -> android.util.Size(1920, 1080)
++    }
++
++    /**
+      * Rebind cameraProvider use cases
+      */
+     private suspend fun bindCameraUseCases(cameraConfiguration: CameraConfiguration) {
+@@ -1626,6 +1638,29 @@
+                 viewModel.cameraController.videoCaptureQualitySelector =
+                     QualitySelector.from(cameraConfiguration.videoQuality)
+ 
++                // On this legacy Exynos HAL a high-speed (60 fps) session needs the preview and
++                // video streams to be the same size. CameraX otherwise picks a 4:3 preview (e.g.
++                // 1440x1080) that does not match the 16:9 high-speed video size, which starves the
++                // capture pipeline and shows a black preview. Pin the preview to the video size
++                // (16:9) while a high-speed rate is selected; clear it otherwise.
++                viewModel.cameraController.previewResolutionSelector =
++                    cameraConfiguration.videoFrameRate?.takeIf { it.value > 30 }?.let {
++                        ResolutionSelector.Builder()
++                            .setAspectRatioStrategy(
++                                AspectRatioStrategy(
++                                    AspectRatio.RATIO_16_9,
++                                    AspectRatioStrategy.FALLBACK_RULE_NONE,
++                                )
++                            )
++                            .setResolutionStrategy(
++                                ResolutionStrategy(
++                                    highSpeedPreviewSize(cameraConfiguration.videoQuality),
++                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
++                                )
++                            )
++                            .build()
++                    }
++
+                 // Set the dynamic range
+                 viewModel.cameraController.videoCaptureDynamicRange =
+                     cameraConfiguration.videoDynamicRange.dynamicRange
+-- 
+2.43.0
+

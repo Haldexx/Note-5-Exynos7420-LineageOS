@@ -396,3 +396,30 @@ fun SipReader.parseMessage(): SipMessage? {
 }
 
 fun SipHeadersMap.uacDialogRoute(): List<String> = get("record-route").orEmpty().reversed()
+
+fun SipHeadersMap.uasDialogRoute(): List<String> = get("record-route").orEmpty()
+
+fun SipHeadersMap.matchesRemoteDialog(request: SipHeadersMap, outgoing: Boolean): Boolean {
+    val remote = IncomingDialogState.tag(get(if (outgoing) "to" else "from")?.firstOrNull())
+    val local = IncomingDialogState.tag(get(if (outgoing) "from" else "to")?.firstOrNull())
+    return get("call-id")?.firstOrNull() == request["call-id"]?.firstOrNull() &&
+        remote != null && local != null &&
+        remote == IncomingDialogState.tag(request["from"]?.firstOrNull()) &&
+        local == IncomingDialogState.tag(request["to"]?.firstOrNull())
+}
+
+/** Keep the UDP peer stable for asynchronous replies after the receive loop advances. */
+class SipDatagramReplyWriter(
+    private val socket: java.net.DatagramSocket,
+    private val address: java.net.InetAddress,
+    private val port: Int,
+) : java.io.OutputStream() {
+    override fun write(value: Int) {
+        throw java.io.IOException("A SIP datagram must be written as a complete message")
+    }
+
+    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+        val packet = java.net.DatagramPacket(bytes, offset, length, address, port)
+        synchronized(socket) { socket.send(packet) }
+    }
+}

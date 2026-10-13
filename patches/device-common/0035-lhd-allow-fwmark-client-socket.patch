@@ -1,0 +1,11 @@
+diff --git a/sepolicy/vendor/lhd.te b/sepolicy/vendor/lhd.te
+--- a/sepolicy/vendor/lhd.te
++++ b/sepolicy/vendor/lhd.te
+@@ -23,3 +23,7 @@
+ allow lhd gps_data_file:fifo_file create_file_perms;
+ 
+ dontaudit lhd system_data_file:dir search;
++
++# Bionic routes network sockets through netd for per-network fwmarks.
++# Without this connection lhd retries continuously under enforcing policy.
++unix_socket_connect(lhd, fwmarkd, netd)

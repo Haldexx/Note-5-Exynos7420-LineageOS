@@ -1,0 +1,46 @@
+From: Haldexx
+Subject: [PATCH] camera: tolerate a dead HAL on notifyDeviceStateChange
+
+HidlProviderInfo calls ICameraProvider@2.5::notifyDeviceStateChange without
+checking the HIDL Return. When the camera HAL dies (e.g. while switching to a
+60 fps mode), the call returns DEAD_OBJECT and the unchecked Return destructor
+aborts cameraserver ("Failed HIDL return status not checked"), which the user
+sees as a crash when changing camera settings. Check the Return and log the
+transport error instead; the existing serviceDied path handles HAL recovery.
+
+---
+ services/camera/libcameraservice/common/hidl/HidlProviderInfo.cpp | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/services/camera/libcameraservice/common/hidl/HidlProviderInfo.cpp b/services/camera/libcameraservice/common/hidl/HidlProviderInfo.cpp
+--- a/services/camera/libcameraservice/common/hidl/HidlProviderInfo.cpp
++++ b/services/camera/libcameraservice/common/hidl/HidlProviderInfo.cpp
+@@ -319,7 +319,11 @@
+             if (castResult.isOk()) {
+                 sp<provider::V2_5::ICameraProvider> interface_2_5 = castResult;
+                 if (interface_2_5 != nullptr) {
+-                    interface_2_5->notifyDeviceStateChange(mDeviceState);
++                    auto stateRet = interface_2_5->notifyDeviceStateChange(mDeviceState);
++                    if (!stateRet.isOk()) {
++                        ALOGE("%s: Transport error calling notifyDeviceStateChange: %s",
++                                __FUNCTION__, stateRet.description().c_str());
++                    }
+                 }
+             }
+         }
+@@ -411,7 +415,11 @@
+                 if (interface_2_5 != nullptr) {
+                   ALOGV("%s: Initial device state for %s: 0x %" PRIx64,
+                         __FUNCTION__, mProviderName.c_str(), mDeviceState);
+-                  interface_2_5->notifyDeviceStateChange(mDeviceState);
++                  auto stateRet = interface_2_5->notifyDeviceStateChange(mDeviceState);
++                  if (!stateRet.isOk()) {
++                      ALOGE("%s: Transport error calling notifyDeviceStateChange: %s",
++                              __FUNCTION__, stateRet.description().c_str());
++                  }
+                 }
+               }
+             }
+-- 
+2.43.0
+

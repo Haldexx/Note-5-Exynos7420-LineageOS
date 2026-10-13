@@ -1,0 +1,29 @@
+diff --git a/camera/Camera3Wrapper.cpp b/camera/Camera3Wrapper.cpp
+--- a/camera/Camera3Wrapper.cpp
++++ b/camera/Camera3Wrapper.cpp
+@@ -22,6 +22,7 @@
+ #include <dlfcn.h>
+ #include <cstring>
+ #include <algorithm>
++#include <signal.h>
+ 
+ #include "CameraWrapper.h"
+ #include "Camera3Wrapper.h"
+@@ -51,6 +52,17 @@
+ 
+     if(gVendorModule)
+         return 0;
++    // Provider dumps can write after a timed-out diagnostic closes its reader.
++    // Return EPIPE to the writer instead of terminating the camera provider.
++    // Preserve any explicit signal handler installed by the hosting process.
++    struct sigaction pipeAction = {};
++    if (sigaction(SIGPIPE, nullptr, &pipeAction) == 0 && pipeAction.sa_handler == SIG_DFL) {
++        pipeAction.sa_handler = SIG_IGN;
++        sigemptyset(&pipeAction.sa_mask);
++        if (sigaction(SIGPIPE, &pipeAction, nullptr) == 0)
++            ALOGI("camera-legacy-close: SIGPIPE now returns EPIPE to native workers");
++    }
++
+ 
+     rv = hw_get_module_by_class("camera", "vendor", (const hw_module_t **)&gVendorModule);
+     if (rv)

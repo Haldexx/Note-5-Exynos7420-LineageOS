@@ -1,0 +1,109 @@
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -34,6 +34,9 @@
+ import android.widget.ImageButton
+ import android.widget.ImageView
+ import android.widget.Toast
++import androidx.lifecycle.asFlow
++import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.withTimeoutOrNull
+ import androidx.activity.enableEdgeToEdge
+ import androidx.activity.viewModels
+ import androidx.appcompat.app.AppCompatActivity
+@@ -159,6 +162,7 @@
+     private val liveHdrButton by lazy { findViewById<Button>(R.id.liveHdrButton) }
+     private val liveHdrPreferences by lazy { getSharedPreferences("live_hdr", MODE_PRIVATE) }
+     private var liveHdrCameraSupported = false
++    private var closingCameraInfo: androidx.camera.core.CameraInfo? = null
+     private val liveHdrKey = CaptureRequest.Key(
+         "samsung.android.control.liveHdrLevel", Int::class.javaObjectType
+     )
+@@ -1483,7 +1487,7 @@
+     /**
+      * Rebind cameraProvider use cases
+      */
+-    private fun bindCameraUseCases(cameraConfiguration: CameraConfiguration) {
++    private suspend fun bindCameraUseCases(cameraConfiguration: CameraConfiguration) {
+         require(viewModel.cameraState.value == CameraState.IDLE) {
+             "Trying to rebind camera while camera is not in IDLE state"
+         }
+@@ -1497,8 +1501,26 @@
+         previewBlurView.freeze()
+         previewBlurView.isVisible = true
+ 
+-        // Unbind previous use cases
++        // Wait for the old device to close before starting the new sensor configuration.
++        // Keep this reference across collectLatest cancellation when controls change quickly.
++        val previousCameraInfo = viewModel.cameraController.cameraInfo ?: closingCameraInfo
++        closingCameraInfo = previousCameraInfo
+         viewModel.cameraController.unbind()
++        if (previousCameraInfo != null) {
++            val closed = withTimeoutOrNull(5_000L) {
++                previousCameraInfo.cameraState.asFlow().first {
++                    it.type == CameraXCameraState.Type.CLOSED
++                }
++            }
++            if (closed == null) {
++                Log.e(LOG_TAG, "Previous camera did not close before rebind")
++                return
++            }
++        }
++        if (previousCameraInfo != null) {
++            viewModel.closePhysicalCameras()
++        }
++        closingCameraInfo = null
+ 
+         // Hide grid until preview is ready
+         gridView.alpha = 0f
+diff --git a/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt b/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
+--- a/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
++++ b/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
+@@ -7,6 +7,12 @@
+ 
+ import android.Manifest
+ import android.content.Context
++import android.os.Handler
++import android.os.Looper
++import androidx.camera.camera2.Camera2Config
++import androidx.camera.camera2.pipe.CameraPipe
++import androidx.camera.core.impl.CameraThreadConfig
++import java.util.concurrent.Executors
+ import androidx.camera.camera2.interop.Camera2CameraInfo
+ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+ import androidx.camera.core.CameraInfo
+@@ -35,6 +41,22 @@
+     coroutineScope: CoroutineScope,
+     private val overlaysRepository: OverlaysRepository,
+ ) {
++    // Keep an owned backend so a graph close can also close the physical device.
++    // The default backend may reuse a device across sensor-speed changes.
++    private val cameraPipe = CameraPipe.create(CameraPipe.Config(appContext = context.applicationContext))
++
++    init {
++        ProcessCameraProvider.configureInstance(Camera2Config.from(
++            cameraPipe,
++            context,
++            CameraThreadConfig.create(Executors.newSingleThreadExecutor(), Handler(Looper.getMainLooper())),
++        ))
++    }
++
++    suspend fun closePhysicalCameras() {
++        cameraPipe.cameras().disconnectAllAsync().await()
++    }
++
+     /**
+      * CameraX's [ProcessCameraProvider].
+      */
+diff --git a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
+--- a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
++++ b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
+@@ -1609,6 +1609,8 @@
+     /**
+      * Get whether or not any camera currently supports video mode.
+      */
++    suspend fun closePhysicalCameras() = cameraRepository.closePhysicalCameras()
++
+     suspend fun isVideoRecordingAvailable() = cameraRepository.cameras.first().any {
+         it.supportsCameraMode(CameraMode.VIDEO)
+     }

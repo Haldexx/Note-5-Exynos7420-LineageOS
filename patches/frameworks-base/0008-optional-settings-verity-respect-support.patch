@@ -1,0 +1,21 @@
+diff --git a/services/core/java/com/android/server/pm/ResilientAtomicFile.java b/services/core/java/com/android/server/pm/ResilientAtomicFile.java
+--- a/services/core/java/com/android/server/pm/ResilientAtomicFile.java
++++ b/services/core/java/com/android/server/pm/ResilientAtomicFile.java
+@@ -24,6 +24,7 @@
+ import android.util.Slog;
+ 
+ import com.android.internal.annotations.VisibleForTesting;
++import com.android.internal.security.VerityUtils;
+ import com.android.server.security.FileIntegrity;
+ 
+ import libcore.io.IoUtils;
+@@ -122,7 +123,8 @@
+     }
+ 
+     public void finishWrite(FileOutputStream str) throws IOException {
+-        finishWrite(str, true /* doFsVerity */);
++        // Settings still use synced main/reserve copies when fs-verity is unsupported.
++        finishWrite(str, VerityUtils.isFsVeritySupported());
+     }
+ 
+     @VisibleForTesting

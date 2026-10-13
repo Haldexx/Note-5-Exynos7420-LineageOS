@@ -1,0 +1,42 @@
+From: Haldexx
+Subject: [PATCH] init: link the noblelte per-variant vendor init lib
+
+Android 16 removed the TARGET_INIT_VENDOR_LIB plumbing this device tree
+relies on: init_second_stage links only libinit, so device/samsung/noblelte
+libinit_noblelte never enters the build and the weak no-op
+vendor_load_properties() in vendor_init.cpp runs instead. The per-variant
+model/name/fingerprint override (set_ro_product_prop keyed on ro.bootloader)
+therefore never runs, so every variant shows the build-baked PRODUCT_MODEL
+(SM-N920I) in Settings > About phone, e.g. on an N920C.
+
+Pull libinit_noblelte into both init_second_stage binaries as a
+whole_static_lib (whole_ is required so its strong vendor_load_properties
+object is kept and overrides the weak default). The lib is
+recovery_available, so it links into the recovery init too.
+
+---
+ init/Android.bp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/init/Android.bp b/init/Android.bp
+--- a/init/Android.bp
++++ b/init/Android.bp
+@@ -309,6 +309,7 @@
+     name: "init_second_stage",
+     defaults: ["init_second_stage_defaults"],
+     static_libs: ["libinit"],
++    whole_static_libs: ["libinit_noblelte"],
+     visibility: ["//visibility:any_system_partition"],
+     required: [
+         "init.rc",
+@@ -325,6 +326,7 @@
+     name: "init_second_stage.recovery",
+     defaults: ["init_second_stage_defaults"],
+     static_libs: ["libinit"],
++    whole_static_libs: ["libinit_noblelte"],
+     recovery: true,
+     cflags: ["-DRECOVERY"],
+     exclude_static_libs: [
+-- 
+2.43.0
+

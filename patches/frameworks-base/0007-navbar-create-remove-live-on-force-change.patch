@@ -1,0 +1,53 @@
+From: Haldexx
+Subject: [PATCH] navbar: create/remove the bar live when the force setting changes
+
+DisplayPolicy already updates hasNavigationBar() live when FORCE_SHOW_NAVBAR
+changes, but SystemUI only created NavigationBar at boot, so toggling it needed
+a reboot. Observe the key: invalidate the cached hasNavBar value, re-query, and
+create or remove the navigation bar accordingly on the main executor.
+
+---
+ packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java b/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java
+--- a/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java
++++ b/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java
+@@ -73,6 +73,9 @@
+ 
+ import java.io.PrintWriter;
+ import java.util.Optional;
++import android.database.ContentObserver;
++import android.os.UserHandle;
++import lineageos.providers.LineageSettings;
+ import java.util.concurrent.Executor;
+ 
+ import javax.inject.Inject;
+@@ -162,6 +165,24 @@
+                 taskStackChangeListeners, displayTracker);
+         mIsLargeScreen = isLargeScreen(mContext);
+         mIsPhone = determineIfPhone(mContext, deviceStateManager);
++        // Create or remove the navigation bar the moment the LineageOS force-navbar setting
++        // changes, so toggling it applies without a reboot.
++        mContext.getContentResolver().registerContentObserver(
++                LineageSettings.System.getUriFor(LineageSettings.System.FORCE_SHOW_NAVBAR),
++                false, new ContentObserver(null) {
++                    @Override
++                    public void onChange(boolean selfChange) {
++                        mExecutor.execute(() -> {
++                            int displayId = mContext.getDisplayId();
++                            mHasNavBarOrTaskbar.delete(displayId);
++                            if (updateHasNavBarForDisplay(displayId)) {
++                                updateNavbarForTaskbar();
++                            } else {
++                                removeNavigationBar(displayId);
++                            }
++                        });
++                    }
++                }, UserHandle.USER_ALL);
+         dumpManager.registerDumpable(this);
+     }
+ 
+-- 
+2.43.0
+

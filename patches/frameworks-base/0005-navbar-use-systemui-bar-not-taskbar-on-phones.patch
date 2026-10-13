@@ -1,0 +1,36 @@
+From: Haldexx
+Subject: [PATCH] navbar: use the SystemUI bar, not the taskbar, on phones
+
+enable_taskbar_on_phones is on, so supportsTaskbar() is true on noblelte and
+initializeTaskbarIfNecessary() removes the SystemUI NavigationBar and shows the
+Launcher taskbar instead. On this hardware-key phone the forced navigation bar
+is then drawn by the taskbar, whose Back/Home/Recents do nothing when pressed
+(touches reach TaskbarManager but no action runs). Stop treating a handheld as
+taskbar-eligible so SystemUI creates its own functional 3-button NavigationBar.
+
+---
+ packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java b/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java
+--- a/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java
++++ b/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarControllerImpl.java
+@@ -288,9 +288,12 @@
+ 
+     @VisibleForTesting
+     boolean supportsTaskbar() {
+-        // Enable for tablets, unfolded state on a foldable device, (non handheld AND flag is set),
+-        // or handheld when enableTaskbarOnPhones() returns true.
+-        boolean foldedOrPhone = !mIsPhone || enableTaskbarOnPhones();
++        // Enable for tablets and the unfolded state on a foldable device. noblelte is a
++        // handheld with hardware keys and no navigation bar overlay; when the user forces
++        // the navigation bar on, use SystemUI's functional 3-button NavigationBar rather
++        // than the Launcher taskbar (whose buttons are inert in this forced case), so
++        // enableTaskbarOnPhones() is intentionally not honoured here.
++        boolean foldedOrPhone = !mIsPhone;
+         return mIsLargeScreen || foldedOrPhone;
+     }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,139 @@
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -37,6 +37,7 @@
+ import androidx.lifecycle.asFlow
+ import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.withTimeoutOrNull
++import kotlinx.coroutines.CancellationException
+ import androidx.activity.enableEdgeToEdge
+ import androidx.activity.viewModels
+ import androidx.appcompat.app.AppCompatActivity
+@@ -1514,6 +1515,24 @@
+         previewBlurView.freeze()
+         previewBlurView.isVisible = true
+ 
++        // Clear HDR on the old normal-rate graph before opening high-speed video.
++        // Waiting for this request prevents a remembered HDR option reaching the new graph.
++        if (liveHdrCameraSupported && !liveHdrAvailable) {
++            viewModel.cameraController.camera2CameraControl?.let { control ->
++                try {
++                    withTimeoutOrNull(1_500L) {
++                        control.addCaptureRequestOptions(CaptureRequestOptions.Builder()
++                            .setCaptureRequestOption(liveHdrKey, 0)
++                            .build()).await()
++                    }
++                } catch (cancelled: CancellationException) {
++                    throw cancelled
++                } catch (error: Exception) {
++                    Log.w(LOG_TAG, "Old camera rejected HDR reset; closing it", error)
++                }
++            }
++        }
++
+         // Wait for the old device to close before starting the new sensor configuration.
+         // Keep this reference across collectLatest cancellation when controls change quickly.
+         val previousCameraInfo = viewModel.cameraController.cameraInfo ?: closingCameraInfo
+@@ -1688,55 +1707,54 @@
+         // Bind camera controller to lifecycle
+         viewModel.cameraController.bindToLifecycle(this)
+ 
+-        // Wait for camera to be ready
+-        lifecycleScope.launch {
+-            viewModel.cameraController.initializationFuture.await()
+-
+-            val camera2CameraControl = viewModel.cameraController.camera2CameraControl ?: run {
+-                Log.wtf(LOG_TAG, "Camera2CameraControl not available even with camera ready?")
+-                return@launch
+-            }
+-
+-            val camera2Options = cameraConfiguration.camera2Options
+-
+-            // Set Camera2 CaptureRequest options
+-            camera2CameraControl.setCaptureRequestOptions(CaptureRequestOptions.Builder()
+-                .setFrameRate(
+-                    when (cameraConfiguration) {
+-                        is CameraConfiguration.Video -> cameraConfiguration.videoFrameRate
+-                        else -> null
+-                    }
+-                )
+-                .setVideoStabilizationMode(
+-                    when (cameraConfiguration) {
+-                        is CameraConfiguration.Video -> when (
+-                            cameraConfiguration.enableVideoStabilization
+-                        ) {
+-                            true -> VideoStabilizationMode.getMode(cameraConfiguration.camera)
+-                            false -> null
+-                        }
+-
+-                        else -> null
+-                    } ?: VideoStabilizationMode.OFF
+-                )
+-                .setEdgeMode(camera2Options.edgeMode)
+-                .setNoiseReductionMode(camera2Options.noiseReductionMode)
+-                .setShadingMode(camera2Options.shadingMode)
+-                .setColorCorrectionAberrationMode(camera2Options.colorCorrectionAberrationMode)
+-                .setDistortionCorrectionMode(camera2Options.distortionCorrectionMode)
+-                .setHotPixelMode(camera2Options.hotPixelMode)
+-                .apply {
+-                    if (cameraConfiguration.camera.supportsSamsungLiveHdr) {
+-                        setCaptureRequestOption(
+-                            liveHdrKey,
+-                            if (liveHdrAvailable &&
+-                                liveHdrPreferences.getBoolean("enabled", false)) 1 else 0
+-                        )
+-                    }
+-                }
+-                .build()
++        // Apply options in the active bind coroutine. collectLatest cancels obsolete
++        // configurations instead of allowing an old FPS/HDR request to reach a new graph.
++        viewModel.cameraController.initializationFuture.await()
++
++        val camera2CameraControl = viewModel.cameraController.camera2CameraControl ?: run {
++            Log.wtf(LOG_TAG, "Camera2CameraControl not available even with camera ready?")
++            return
++        }
++
++        val camera2Options = cameraConfiguration.camera2Options
++
++        // Set Camera2 CaptureRequest options
++        camera2CameraControl.setCaptureRequestOptions(CaptureRequestOptions.Builder()
++            .setFrameRate(
++                when (cameraConfiguration) {
++                    is CameraConfiguration.Video -> cameraConfiguration.videoFrameRate
++                    else -> null
++                }
+             )
+-        }
++            .setVideoStabilizationMode(
++                when (cameraConfiguration) {
++                    is CameraConfiguration.Video -> when (
++                        cameraConfiguration.enableVideoStabilization
++                    ) {
++                        true -> VideoStabilizationMode.getMode(cameraConfiguration.camera)
++                        false -> null
++                    }
++
++                    else -> null
++                } ?: VideoStabilizationMode.OFF
++            )
++            .setEdgeMode(camera2Options.edgeMode)
++            .setNoiseReductionMode(camera2Options.noiseReductionMode)
++            .setShadingMode(camera2Options.shadingMode)
++            .setColorCorrectionAberrationMode(camera2Options.colorCorrectionAberrationMode)
++            .setDistortionCorrectionMode(camera2Options.distortionCorrectionMode)
++            .setHotPixelMode(camera2Options.hotPixelMode)
++            .apply {
++                if (cameraConfiguration.camera.supportsSamsungLiveHdr) {
++                    setCaptureRequestOption(
++                        liveHdrKey,
++                        if (liveHdrAvailable &&
++                            liveHdrPreferences.getBoolean("enabled", false)) 1 else 0
++                    )
++                }
++            }
++            .build()
++        )
+ 
+         // Restore settings that can be set on the fly
+         viewModel.setVideoMicrophoneEnabled(viewModel.videoMicMode.value)

@@ -1,0 +1,44 @@
+diff --git a/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt b/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
+--- a/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
++++ b/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
+@@ -8,6 +8,8 @@
+ import android.Manifest
+ import android.content.Context
+ import android.hardware.camera2.CameraDevice
++import android.os.Build
++import androidx.camera.camera2.pipe.CameraGraph
+ import android.util.Log
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.first
+@@ -66,12 +68,30 @@
+             Log.w("AperturePhysicalCamera", "Camera ${camera.id} error $error; awaiting close")
+         }
+     }
+-    private val cameraPipe = CameraPipe.create(CameraPipe.Config(
++    private val physicalCameraPipe = CameraPipe.create(CameraPipe.Config(
+         appContext = context.applicationContext,
+         cameraInteropConfig = CameraPipe.CameraInteropConfig(
+             cameraDeviceStateCallback = physicalCameraCallback,
+         ),
+     ))
++
++    // The legacy Exynos HAL cannot safely reconfigure a blank 320x240 session
++    // while stopping high-speed video. Close the actual device instead, without
++    // a separate abortCaptures flush racing the final close/drain.
++    private fun closeSafeConfig(config: CameraGraph.Config): CameraGraph.Config =
++        if (Build.HARDWARE == "samsungexynos7420") config.copy(flags = config.flags.copy(
++            configureBlankSessionOnStop = false,
++            abortCapturesOnStop = false,
++            closeCameraDeviceOnClose = true,
++        )) else config
++
++    private val cameraPipe = object : CameraPipe by physicalCameraPipe {
++        override fun create(config: CameraGraph.Config): CameraGraph =
++            physicalCameraPipe.create(closeSafeConfig(config))
++
++        override fun createCameraGraph(config: CameraGraph.Config): CameraGraph =
++            physicalCameraPipe.createCameraGraph(closeSafeConfig(config))
++    }
+ 
+     init {
+         ProcessCameraProvider.configureInstance(Camera2Config.from(

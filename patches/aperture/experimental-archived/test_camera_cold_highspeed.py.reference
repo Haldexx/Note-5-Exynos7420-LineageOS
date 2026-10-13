@@ -1,0 +1,55 @@
+"""A cold launch must not open the first camera session in the Exynos high-speed path.
+
+Usage: python3 test_camera_cold_highspeed.py /android/source
+
+Restoring a remembered high-speed (> 30 fps) video mode made the first camera session on a
+cold launch open directly in the Exynos high-speed pipeline, which starves the preview buffer
+queue (3AA inputFrameQ timeout) and shows a black preview. Switching into a high-speed mode at
+runtime already works because the mode change closes and reopens the device first.
+
+aperture 0004 clamps the first video session to a safe frame rate on a cold start, then restores
+the remembered high-speed rate as a normal reconfigure once the primer session is open (the
+existing close-and-reopen path, which configures high speed reliably).
+
+Checks CameraViewModel.kt:
+  - the frame-rate enum and the helpers are present,
+  - initializeCameraConfiguration clamps a > FPS_30 target before the first bind,
+  - the remembered rate is restored only after the primer session opens.
+"""
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+vm = (src / 'packages/apps/Aperture/app/src/main/java/org/lineageos/aperture/'
+      'viewmodels/CameraViewModel.kt').read_text()
+
+required = [
+    # imports
+    'import androidx.camera.core.CameraState as CameraXCameraState',
+    'import kotlinx.coroutines.withTimeoutOrNull',
+    'import org.lineageos.aperture.models.FrameRate',
+    # state + helpers
+    'pendingColdHighSpeedFrameRate',
+    'private fun safeColdStartFrameRate(',
+    'private fun scheduleColdHighSpeedRestore(',
+    # cold-start clamp: only high-speed targets are substituted
+    'target.value > FrameRate.FPS_30.value',
+    # restore waits for the primer session to actually open
+    'CameraXCameraState.Type.OPEN',
+    # restore goes through the normal reconfigure path
+    'updateConfiguration<CameraConfiguration.Video>',
+]
+for token in required:
+    assert token in vm, f'missing: {token}'
+
+# The clamp must run inside initializeCameraConfiguration (cold start), not in the shared
+# createInitialCameraConfiguration (which is reused by runtime mode switches that already work).
+init = vm.split('fun initializeCameraConfiguration', 1)
+assert len(init) == 2, 'initializeCameraConfiguration not found'
+body = init[1].split('fun safeColdStartFrameRate', 1)[0]
+assert 'pendingColdHighSpeedFrameRate = target' in body, \
+    'cold-start clamp is not inside initializeCameraConfiguration'
+assert 'scheduleColdHighSpeedRestore' in body, \
+    'high-speed restore is not scheduled from initializeCameraConfiguration'
+
+print('PASS: cold start clamps high-speed video and restores it via a reconfigure')
