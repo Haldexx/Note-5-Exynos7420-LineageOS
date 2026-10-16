@@ -1,0 +1,30 @@
+Subject: [PATCH] ipv6: remove routes retaining an unregistering address device
+
+A live N920I snapshot finds a FIB route with dst.dev=lo but
+rt6i_idev->dev=ipsec37 after that MMS interface is unregistered. The old
+fib6_ifdown predicate misses it, leaving the IPv6 address-device reference
+and netd teardown stuck. Match the address device during unregister too.
+Preserve ordinary administrative-down behavior and tolerate absent idev.
+Repeated unregister notifications use NETREG_UNREGISTERED in this tree.
+
+This is a targeted 3.10 adaptation of the ownership condition discussed at
+https://lkml.iu.edu/1708.1/04771.html; not a verbatim modern-kernel backport.
+
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -2169,7 +2169,14 @@
+ 	const struct arg_dev_net *adn = arg;
+ 	const struct net_device *dev = adn->dev;
+ 
+-	if ((rt->dst.dev == dev || !dev) &&
++	/* Local/cache routes may use loopback for output while retaining the
++	 * address device through rt6i_idev. Include that owner on unregister,
++	 * including repeated notifications after NETREG_UNREGISTERED.
++	 */
++	if ((rt->dst.dev == dev || !dev ||
++	     (rt->rt6i_idev && rt->rt6i_idev->dev == dev &&
++	      (dev->reg_state == NETREG_UNREGISTERING ||
++	       dev->reg_state == NETREG_UNREGISTERED))) &&
+ 	    rt != adn->net->ipv6.ip6_null_entry)
+ 		return -1;
+ 

@@ -34,12 +34,18 @@ PRODUCT_COPY_FILES += \
     device/samsung/nobleltedv/modem/init.nobleltedv-ril.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/init.nobleltedv-ril.rc \
     vendor/samsung/universal7420-common/proprietary/vendor/bin/hw/rild:$(TARGET_COPY_OUT_VENDOR)/bin/hw/rild \
     vendor/samsung/universal7420-common/proprietary/vendor/etc/init/init.vendor.rilcommon.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/init.vendor.rilcommon.rc
-PRODUCT_VENDOR_PROPERTIES += ro.vendor.multisim.simslotcount=1
+# Default remains single-SIM if hardware detection cannot establish two slots.
+PRODUCT_VENDOR_PROPERTIES += \
+    ro.vendor.multisim.simslotcount=1 \
+    ro.vendor.note5.sim_autodetect=true
 PRODUCT_SYSTEM_PROPERTIES += ro.telephony.default_network=9
 PRODUCT_SYSTEM_PROPERTIES += ro.arch=exynos7420
 
 PRODUCT_PACKAGES += PhhIms PhhImsTelephonyOverlay PhhImsFrameworkOverlay
 PRODUCT_PACKAGES += Iwlan QualifiedNetworksService
+# Compile keyboard methods ahead of time on Exynos7420. The live speed-filter
+# comparison improved typing; keep other apps on their existing filters.
+PRODUCT_DEXPREOPT_SPEED_APPS += LatinIME
 DEVICE_PACKAGE_OVERLAYS := device/samsung/nobleltedv/overlay-wfc $(DEVICE_PACKAGE_OVERLAYS)
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.software.ipsec_tunnels.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.software.ipsec_tunnels.xml

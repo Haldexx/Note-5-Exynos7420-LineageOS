@@ -1,9 +1,14 @@
 package me.phh.ims
 
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.Context
 import android.os.Bundle
 import android.os.Message
 import android.telephony.Rlog
+import android.telephony.AccessNetworkConstants
+import android.telephony.CarrierConfigManager
 import android.telephony.ServiceState
 import android.telephony.PhoneStateListener
 import android.telephony.SubscriptionManager
@@ -52,32 +57,83 @@ class PhhMmTelFeature(
     fun getSipHandlerOrNull(): SipHandler? = if (this::sipHandler.isInitialized) sipHandler else null
 
     private var serviceStateListener: PhoneStateListener? = null
+    private var simReadyReceiver: BroadcastReceiver? = null
+    private var readinessContext: Context? = null
+    private var smsSubscriptionId = SubscriptionManager.INVALID_SUBSCRIPTION_ID
+    private var frameworkFeatureReady = false
+
+    private fun configureSmsCapabilities(context: Context) {
+        val defaults = CarrierConfigManager.getDefaultConfig()
+        val config = context.getSystemService(CarrierConfigManager::class.java)
+            ?.getConfigForSubId(smsSubscriptionId) ?: defaults
+        val supportedKey = CarrierConfigManager.ImsSms.KEY_SMS_OVER_IMS_SUPPORTED_BOOL
+        val ratsKey = CarrierConfigManager.ImsSms.KEY_SMS_OVER_IMS_SUPPORTED_RATS_INT_ARRAY
+        val supported = SubscriptionManager.isValidSubscriptionId(smsSubscriptionId) &&
+            config.getBoolean(supportedKey, defaults.getBoolean(supportedKey))
+        val rats = config.getIntArray(ratsKey) ?: defaults.getIntArray(ratsKey) ?: intArrayOf()
+        setSmsTransportSupport(
+            supported && rats.contains(AccessNetworkConstants.AccessNetworkType.EUTRAN),
+            supported && rats.contains(AccessNetworkConstants.AccessNetworkType.IWLAN),
+        )
+    }
 
     fun prepare(context: Context) {
         if (!setupDone.compareAndSet(false, true)) return
         featureState = STATE_INITIALIZING
         val subId = SubscriptionManager.getSubId(slotId)?.firstOrNull()
-            ?: SubscriptionManager.getDefaultSubscriptionId()
+            ?: SubscriptionManager.INVALID_SUBSCRIPTION_ID
+        smsSubscriptionId = subId
         telephonyManager = context.getSystemService(TelephonyManager::class.java)
             .createForSubscriptionId(subId)
+        readinessContext = context
         val listener = object : PhoneStateListener(context.mainExecutor) {
             override fun onServiceStateChanged(serviceState: ServiceState) {
-                val registered = serviceState.networkRegistrationInfoList.any {
-                    it.isRegistered && !it.registeredPlmn.isNullOrEmpty()
-                }
-                if (!registered) return
-                val subscription = context.getSystemService(SubscriptionManager::class.java)
-                    .getActiveSubscriptionInfoForSimSlotIndex(slotId) ?: return
-                val manager = context.getSystemService(TelephonyManager::class.java)
-                    .createForSubscriptionId(subscription.subscriptionId)
-                if (manager.simOperator.length !in 5..6) return
-                featureState = STATE_READY
-                telephonyManager?.listen(this, PhoneStateListener.LISTEN_NONE)
-                serviceStateListener = null
+                updateFeatureReadiness(context)
             }
         }
         serviceStateListener = listener
-        telephonyManager?.listen(listener, PhoneStateListener.LISTEN_SERVICE_STATE)
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context, intent: Intent) {
+                updateFeatureReadiness(context)
+            }
+        }
+        simReadyReceiver = receiver
+        val filter = IntentFilter(TelephonyManager.ACTION_SIM_APPLICATION_STATE_CHANGED)
+        filter.addAction(CarrierConfigManager.ACTION_CARRIER_CONFIG_CHANGED)
+        context.registerReceiver(receiver, filter, android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE,
+            null, Context.RECEIVER_EXPORTED)
+        if (SubscriptionManager.isValidSubscriptionId(subId)) {
+            telephonyManager?.listen(listener, PhoneStateListener.LISTEN_SERVICE_STATE)
+        }
+        updateFeatureReadiness(context)
+    }
+
+    @Synchronized
+    private fun updateFeatureReadiness(context: Context) {
+        if (featureState != STATE_INITIALIZING) return
+        val subscription = context.getSystemService(SubscriptionManager::class.java)
+            .getActiveSubscriptionInfoForSimSlotIndex(slotId) ?: return
+        val manager = context.getSystemService(TelephonyManager::class.java)
+            .createForSubscriptionId(subscription.subscriptionId)
+        if (manager.simState != TelephonyManager.SIM_STATE_READY &&
+            manager.simState != TelephonyManager.SIM_STATE_LOADED) return
+        if (!manager.simOperator.matches(Regex("[0-9]{5,6}")) ||
+            manager.subscriberId.isNullOrEmpty()) return
+        // IMS needs loaded SIM credentials, not registration on a cellular network.
+        clearReadinessListeners()
+        telephonyManager = manager
+        smsSubscriptionId = subscription.subscriptionId
+        configureSmsCapabilities(context)
+        featureState = STATE_READY
+        if (frameworkFeatureReady) onFeatureReady()
+    }
+
+    private fun clearReadinessListeners() {
+        serviceStateListener?.let { telephonyManager?.listen(it, PhoneStateListener.LISTEN_NONE) }
+        serviceStateListener = null
+        simReadyReceiver?.let { receiver -> readinessContext?.unregisterReceiver(receiver) }
+        simReadyReceiver = null
+        readinessContext = null
     }
 
     override fun createCallProfile(
@@ -219,6 +275,19 @@ class PhhMmTelFeature(
                 // Report the call's network type (WiFi vs LTE) as soon as it is progressing so the
                 // VoWiFi indicator appears while placing/ringing, not only once connected. This is
                 // an ignoreState update, so it refreshes the RAT without changing the call state.
+                //
+                // The pushed profile's audio direction MUST mirror the early-media state. The
+                // framework decides whether to play the local ringback tone from the call profile's
+                // audio direction (ImsPhoneCall.isLocalTone): DIRECTION_INACTIVE (no early media)
+                // means "play local ringback", anything else means "a media path exists, stay
+                // silent". session.currentProfile is the dialer's profile and still carries the
+                // default DIRECTION_SEND_RECEIVE, so pushing it as-is right after
+                // callSessionProgressing(INACTIVE) made the framework cancel the ringback it had
+                // just started - no dial tone while ringing. Align the direction with earlyMedia
+                // before pushing so the RAT refresh leaves the ringback decision untouched.
+                session.currentProfile.mMediaProfile.mAudioDirection =
+                    if (earlyMedia) ImsStreamMediaProfile.DIRECTION_SEND_RECEIVE
+                    else ImsStreamMediaProfile.DIRECTION_INACTIVE
                 updateCallNetworkType(session.currentProfile)
                 session.mListener.callSessionUpdated(session.currentProfile)
             }
@@ -267,21 +336,27 @@ class PhhMmTelFeature(
         return ImsUtImplBase()
     }
 
+    @Synchronized
     override fun onFeatureReady() {
         Rlog.d(TAG, "$slotId onFeatureReady")
-        if (this::sipHandler.isInitialized) return
+        if (featureState == STATE_UNAVAILABLE) return
+        frameworkFeatureReady = true
+        if (featureState != STATE_READY || this::sipHandler.isInitialized) return
 
         val imsService = PhhImsService.Companion.instance!!
-        sipHandler = SipHandler(imsService)
-        sipHandler.imsFailureCallback = { imsService.getRegistration(slotId).onDeregistered(null) }
+        val registration = imsService.getRegistration(slotId)
+        sipHandler = SipHandler(imsService, slotId)
+        sipHandler.imsFailureCallback = { registration.onDeregistered(null) }
         sipHandler.imsReadyCallback = {
+            configureSmsCapabilities(imsService)
             setActiveRegistrationTech(sipHandler.registrationTech)
-            imsService.getRegistration(slotId).onRegistered(sipHandler.registrationTech)
+            registration.onRegistered(sipHandler.registrationTech)
         }
         sipHandler.imsRegisteringCallback = {
-            imsService.getRegistration(slotId).onRegistering(sipHandler.registrationTech)
+            registration.onRegistering(sipHandler.registrationTech)
         }
         imsSms.sipHandler = sipHandler
+        configureSmsCapabilities(imsService)
         sipHandler.onSmsReceived = imsSms::onSmsReceived
         sipHandler.onSmsStatusReportReceived = imsSms::onSmsStatusReportReceived
 
@@ -427,10 +502,14 @@ class PhhMmTelFeature(
         sipHandler.getVolteNetwork()
     }
 
+    @Synchronized
     override fun onFeatureRemoved() {
         Rlog.d(TAG, "$slotId onFeatureRemoved")
-        serviceStateListener?.let { telephonyManager?.listen(it, PhoneStateListener.LISTEN_NONE) }
-        serviceStateListener = null
+        featureState = STATE_UNAVAILABLE
+        frameworkFeatureReady = false
+        clearReadinessListeners()
+        if (this::sipHandler.isInitialized) sipHandler.close()
+        PhhImsService.instance?.releaseMmTelFeature(slotId, this)
     }
 
     override fun queryCapabilityConfiguration(

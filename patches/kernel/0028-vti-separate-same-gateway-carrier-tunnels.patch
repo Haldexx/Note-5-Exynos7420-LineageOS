@@ -1,0 +1,127 @@
+--- a/net/ipv4/ip_vti.c
++++ b/net/ipv4/ip_vti.c
+@@ -27,6 +27,7 @@
+ #include <linux/skbuff.h>
+ #include <linux/netdevice.h>
+ #include <linux/in.h>
++#include <linux/inetdevice.h>
+ #include <linux/tcp.h>
+ #include <linux/udp.h>
+ #include <linux/if_arp.h>
+@@ -38,6 +39,7 @@
+ #include <net/sock.h>
+ #include <net/ip.h>
+ #include <net/ipv6.h>
++#include <net/addrconf.h>
+ #include <net/icmp.h>
+ #include <net/ip_tunnels.h>
+ #include <net/inet_ecn.h>
+@@ -172,7 +174,11 @@
+ 	for (tp = __vti_bucket(ipn, parms);
+ 	     (t = rtnl_dereference(*tp)) != NULL;
+ 	     tp = &t->next) {
+-		if (local == t->parms.iph.saddr && remote == t->parms.iph.daddr)
++		/* A carrier can use one gateway for several PDNs. Keys identify
++		 * separate VTI policies even when the outer endpoints are equal.
++		 */
++		if (local == t->parms.iph.saddr && remote == t->parms.iph.daddr &&
++		    parms->i_key == t->parms.i_key && parms->link == t->parms.link)
+ 			return t;
+ 	}
+ 	if (!create)
+@@ -277,6 +283,61 @@
+ 	return err;
+ }
+ 
++/* Multiple phone PDNs can share the outer endpoints but have distinct inner
++ * addresses. Decapsulation has already authenticated the SA. Select its local
++ * destination before the mandatory marked policy check below, rather than the
++ * most recently inserted VTI. Never guess between ambiguous matching addresses.
++ * A lone VTI retains the existing forwarding/wildcard behaviour.
++ */
++static bool vti_has_local_address(struct net *net, struct net_device *dev,
++				  struct sk_buff *skb, int family)
++{
++	if (family == AF_INET6)
++		return ipv6_chk_addr(net, &ipv6_hdr(skb)->daddr, dev, 1);
++	else {
++		struct in_device *in_dev = __in_dev_get_rcu(dev);
++		__be32 addr = ip_hdr(skb)->daddr;
++
++		return in_dev && inet_confirm_addr(in_dev, 0, addr, RT_SCOPE_HOST) == addr;
++	}
++}
++
++static struct ip_tunnel *vti_tunnel_lookup_rx(struct net *net, __be32 remote,
++					    __be32 local, struct sk_buff *skb,
++					    int family)
++{
++	struct vti_net *ipn = net_generic(net, vti_net_id);
++	unsigned h0 = HASH(remote), h1 = HASH(local);
++	struct ip_tunnel *heads[4], *t, *only, *address_match;
++	int bucket, count, matches;
++
++	heads[0] = rcu_dereference(ipn->tunnels_r_l[h0 ^ h1]);
++	heads[1] = rcu_dereference(ipn->tunnels_r[h0]);
++	heads[2] = rcu_dereference(ipn->tunnels_l[h1]);
++	heads[3] = rcu_dereference(ipn->tunnels_wc[0]);
++	for (bucket = 0; bucket < 4; bucket++) {
++		only = address_match = NULL;
++		count = matches = 0;
++		for (t = heads[bucket]; t; t = rcu_dereference(t->next)) {
++			if (!(t->dev->flags & IFF_UP) ||
++			    (bucket < 2 && remote != t->parms.iph.daddr) ||
++			    ((bucket == 0 || bucket == 2) && local != t->parms.iph.saddr))
++				continue;
++			only = t;
++			count++;
++			if (vti_has_local_address(net, t->dev, skb, family)) {
++				address_match = t;
++				matches++;
++			}
++		}
++		if (count == 1)
++			return only;
++		if (count > 1)
++			return matches == 1 ? address_match : ERR_PTR(-EADDRNOTAVAIL);
++	}
++	return NULL;
++}
++
+ /* Called after authenticated tunnel decapsulation for either inner family.
+  * The outer addresses must come from the validated SA: ip_hdr() is now inner.
+  */
+@@ -289,9 +350,6 @@
+ 	int family, ret;
+ 
+ 	if (!x || x->props.family != AF_INET || x->props.mode != XFRM_MODE_TUNNEL)
+-		return 0;
+-	tunnel = vti_tunnel_lookup(dev_net(skb->dev), x->props.saddr.a4, x->id.daddr.a4);
+-	if (!tunnel)
+ 		return 0;
+ 	if (skb->protocol == htons(ETH_P_IP))
+ 		family = AF_INET;
+@@ -299,6 +357,13 @@
+ 		family = AF_INET6;
+ 	else
+ 		return -EPROTONOSUPPORT;
++
++	tunnel = vti_tunnel_lookup_rx(dev_net(skb->dev), x->props.saddr.a4,
++				     x->id.daddr.a4, skb, family);
++	if (!tunnel)
++		return 0;
++	if (IS_ERR(tunnel))
++		return PTR_ERR(tunnel);
+ 
+ 	oldmark = skb->mark;
+ 	skb->mark = be32_to_cpu(tunnel->parms.i_key);
+@@ -805,6 +870,9 @@
+ 		netdev_state_change(dev);
+ 	}
+ 
++	t->parms.i_key = p.i_key;
++	t->parms.o_key = p.o_key;
++
+ 	if (t->parms.link != p.link) {
+ 		t->parms.link = p.link;
+ 		mtu = vti_tunnel_bind_dev(dev);

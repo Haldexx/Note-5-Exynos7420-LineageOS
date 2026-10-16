@@ -1,0 +1,49 @@
+diff --git a/src/java/com/android/internal/telephony/GsmCdmaPhone.java b/src/java/com/android/internal/telephony/GsmCdmaPhone.java
+--- a/src/java/com/android/internal/telephony/GsmCdmaPhone.java
++++ b/src/java/com/android/internal/telephony/GsmCdmaPhone.java
+@@ -602,7 +602,12 @@
+     public ServiceState getServiceState() {
+         ServiceState baseSs = mSST != null ? mSST.getServiceState() : new ServiceState();
+         ServiceState imsSs = mImsPhone != null ? mImsPhone.getServiceState() : new ServiceState();
+-        return mergeVoiceServiceStates(baseSs, imsSs, mTelecomVoiceServiceStateOverride);
++        boolean wifiVoiceRegistered = mImsPhone != null
++                && mImsPhone.isImsRegistered() && mImsPhone.isWifiCallingEnabled()
++                && mImsPhone.getImsRegistrationTech()
++                        == ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN;
++        return mergeVoiceServiceStates(
++                baseSs, imsSs, mTelecomVoiceServiceStateOverride, wifiVoiceRegistered);
+     }
+ 
+     @Override
+@@ -962,15 +967,15 @@
+      *
+      * <ul>
+      *   <li>IMS voice registration state ({@code imsSs}) - if this is {@code IN_SERVICE} for voice,
+-     *       we substite {@code baseSs#getDataRegState} as the final voice service state (ImsService
+-     *       reports {@code IN_SERVICE} for its voice registration state even if the device has lost
+-     *       the physical link to the tower)
++     *       we use registered Wi-Fi voice independently of cellular coverage; for cellular IMS we
++     *       substitute {@code baseSs#getDataRegState} to verify the physical link to the tower
+      *   <li>OTT voice capability provided through telecom ({@code telecomSs}) - if this is {@code
+      *       IN_SERVICE}, we directly substitute it as the final voice service state
+      * </ul>
+      */
+     private static ServiceState mergeVoiceServiceStates(
+-            ServiceState baseSs, ServiceState imsSs, @ServiceState.RegState int telecomSs) {
++            ServiceState baseSs, ServiceState imsSs, @ServiceState.RegState int telecomSs,
++            boolean wifiVoiceRegistered) {
+         if (baseSs.getState() == ServiceState.STATE_IN_SERVICE) {
+             // No need to merge states if the baseSs is IN_SERVICE.
+             return baseSs;
+@@ -988,7 +993,10 @@
+             // Voice override for IMS case. In this case, voice registration is OUT_OF_SERVICE, but
+             // IMS is available, so use data registration state as a basis for determining
+             // whether or not the physical link is available.
+-            finalVoiceSs = baseSs.getDataRegistrationState();
++            // Registered Wi-Fi voice uses the WLAN bearer, independently of cellular data.
++            // Preserve the physical cellular-data check for cellular IMS registration.
++            finalVoiceSs = wifiVoiceRegistered ? ServiceState.STATE_IN_SERVICE
++                    : baseSs.getDataRegistrationState();
+         }
+         if (finalVoiceSs != ServiceState.STATE_IN_SERVICE) {
+             // None of the additional sources provide a usable route, and they only use IN/OUT.

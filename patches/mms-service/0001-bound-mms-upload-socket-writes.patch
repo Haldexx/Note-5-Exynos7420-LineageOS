@@ -1,0 +1,110 @@
+Subject: [PATCH] mms: bound blocked upload socket writes on the carrier network
+
+Preserve network-specific DNS, sockets, proxies and carrier timeouts. Use the
+carrier timeout (60 seconds if nonpositive) for SO_SNDTIMEO so a large POST
+cannot wait indefinitely after its peer stops accepting data. No APN mapping.
+
+--- a/src/com/android/mms/service/MmsHttpClient.java
++++ b/src/com/android/mms/service/MmsHttpClient.java
+@@ -21,6 +21,10 @@
+ import android.net.LinkProperties;
+ import android.net.Network;
+ import android.os.Bundle;
++import android.system.ErrnoException;
++import android.system.Os;
++import android.system.OsConstants;
++import android.system.StructTimeval;
+ import android.telephony.CarrierConfigManager;
+ import android.telephony.SmsManager;
+ import android.telephony.SubscriptionManager;
+@@ -46,12 +50,17 @@
+ import java.net.MalformedURLException;
+ import java.net.ProtocolException;
+ import java.net.Proxy;
++import java.net.Socket;
+ import java.net.URL;
++import java.util.Arrays;
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.Map;
+ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
++import java.util.concurrent.TimeUnit;
++import javax.net.SocketFactory;
++import libcore.net.http.HttpURLConnectionFactory;
+ 
+ /**
+  * MMS HTTP client for sending and downloading MMS messages
+@@ -134,7 +143,16 @@
+             final URL url = new URL(urlString);
+             maybeWaitForIpv4(requestId, url);
+             // Now get the connection
+-            connection = (HttpURLConnection) mNetwork.openConnection(url, proxy);
++            final int carrierTimeout = mmsConfig.getInt(SmsManager.MMS_CONFIG_HTTP_SOCKET_TIMEOUT);
++            final int writeTimeout = carrierTimeout > 0 ? carrierTimeout : 60000;
++            // URLConnection has no write-timeout setter. Its Android handler leaves writes
++            // infinite, so a stalled large POST can hold the MMS bearer indefinitely.
++            // Keep both DNS and sockets on the carrier network, including private-DNS bypass.
++            final HttpURLConnectionFactory factory = HttpURLConnectionFactory.createInstance();
++            factory.setDns(hostname -> Arrays.asList(mNetwork.getAllByName(hostname)));
++            factory.setNewConnectionPool(0, 1, TimeUnit.MINUTES);
++            connection = (HttpURLConnection) factory.openConnection(url,
++                    new WriteTimeoutSocketFactory(mNetwork.getSocketFactory(), writeTimeout), proxy);
+             connection.setDoInput(true);
+             connection.setConnectTimeout(
+                     mmsConfig.getInt(SmsManager.MMS_CONFIG_HTTP_SOCKET_TIMEOUT));
+@@ -246,6 +264,54 @@
+         }
+     }
+ 
++
++    /** Bound only MMS sockets; never change the process-wide socket or HTTP defaults. */
++    @VisibleForTesting
++    static final class WriteTimeoutSocketFactory extends SocketFactory {
++        private final SocketFactory mDelegate;
++        private final int mTimeoutMillis;
++
++        WriteTimeoutSocketFactory(SocketFactory delegate, int timeoutMillis) {
++            if (timeoutMillis <= 0) throw new IllegalArgumentException("Finite write timeout required");
++            mDelegate = delegate;
++            mTimeoutMillis = timeoutMillis;
++        }
++
++        private Socket configure(Socket socket) throws IOException {
++            boolean configured = false;
++            try {
++                // Force descriptor creation for unconnected SocketFactory implementations.
++                socket.getReuseAddress();
++                Os.setsockoptTimeval(socket.getFileDescriptor$(), OsConstants.SOL_SOCKET,
++                        OsConstants.SO_SNDTIMEO, StructTimeval.fromMillis(mTimeoutMillis));
++                configured = true;
++                return socket;
++            } catch (ErrnoException e) {
++                throw new IOException("Unable to set MMS socket write timeout", e);
++            } finally {
++                if (!configured) socket.close();
++            }
++        }
++
++        @Override public Socket createSocket() throws IOException {
++            return configure(mDelegate.createSocket());
++        }
++        @Override public Socket createSocket(String host, int port) throws IOException {
++            return configure(mDelegate.createSocket(host, port));
++        }
++        @Override public Socket createSocket(String host, int port, InetAddress local, int localPort)
++                throws IOException {
++            return configure(mDelegate.createSocket(host, port, local, localPort));
++        }
++        @Override public Socket createSocket(InetAddress host, int port) throws IOException {
++            return configure(mDelegate.createSocket(host, port));
++        }
++        @Override public Socket createSocket(InetAddress host, int port,
++                InetAddress local, int localPort) throws IOException {
++            return configure(mDelegate.createSocket(host, port, local, localPort));
++        }
++    }
++
+     private void maybeWaitForIpv4(final String requestId, final URL url) {
+         // If it's a literal IPv4 address and we're on an IPv6-only network,
+         // wait until IPv4 is available.

@@ -1,0 +1,25 @@
+From: Note 5 port maintainers
+Subject: [PATCH] ipv6: release blackhole route idev on device teardown
+
+An IPv6 socket can cache a one-shot blackhole route while an XFRM policy
+exists without a matching SA. Generic dst teardown moves dst.dev to lo,
+but without the IPv6 ifdown callback rt6i_idev still pins the removed
+tunnel. On the legacy kernel this blocks RTM_DELLINK, netd and the global
+IpSecService lock, preventing subsequent MMS and IMS setup.
+
+Use the existing IPv6 route callback to release that idev reference.
+The route remains a discard route; no XFRM policy check is bypassed.
+Reproduced with a fixed isolated VTI and a held IPv6 UDP socket: ordinary
+and active-SA deletion completes in <0.2 s; missing-SA deletion waits
+until the socket closes and reports Usage count = 1.
+
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -204,6 +204,7 @@
+ 	.family			=	AF_INET6,
+ 	.protocol		=	cpu_to_be16(ETH_P_IPV6),
+ 	.destroy		=	ip6_dst_destroy,
++	.ifdown			=	ip6_dst_ifdown,
+ 	.check			=	ip6_dst_check,
+ 	.mtu			=	ip6_blackhole_mtu,
+ 	.default_advmss		=	ip6_default_advmss,

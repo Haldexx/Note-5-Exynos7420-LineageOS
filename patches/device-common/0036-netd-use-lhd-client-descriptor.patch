@@ -1,0 +1,10 @@
+diff --git a/sepolicy/vendor/lhd.te b/sepolicy/vendor/lhd.te
+--- a/sepolicy/vendor/lhd.te
++++ b/sepolicy/vendor/lhd.te
+@@ -27,3 +27,6 @@
+ # Bionic routes network sockets through netd for per-network fwmarks.
+ # Without this connection lhd retries continuously under enforcing policy.
+ unix_socket_connect(lhd, fwmarkd, netd)
++
++# fwmarkd receives the client socket over SCM_RIGHTS before setting its mark.
++allow netd lhd:fd use;

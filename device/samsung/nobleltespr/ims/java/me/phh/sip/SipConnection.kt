@@ -115,9 +115,12 @@ class SipConnectionTcp(
     override fun getChannel(): SelectableChannel = socket.channel
 
     override fun close() {
-        socket.close()
-        if (this::inTransform.isInitialized) inTransform.close()
-        if (this::outTransform.isInitialized) outTransform.close()
+        try {
+            socket.close()
+        } finally {
+            if (this::inTransform.isInitialized) SipIpSecCleanup.release(inTransform)
+            if (this::outTransform.isInitialized) SipIpSecCleanup.release(outTransform)
+        }
     }
 
     override fun enableIpsec(
@@ -182,9 +185,12 @@ class SipConnectionTcpServer(
     }
 
     fun close() {
-        serverSocket.close()
-        if (this::inTransform.isInitialized) inTransform.close()
-        if (this::outTransform.isInitialized) outTransform.close()
+        try {
+            serverSocket.close()
+        } finally {
+            if (this::inTransform.isInitialized) SipIpSecCleanup.release(inTransform)
+            if (this::outTransform.isInitialized) SipIpSecCleanup.release(outTransform)
+        }
     }
 
     fun getChannel(): SelectableChannel = serverSocket.channel
@@ -283,7 +289,12 @@ class SipConnectionUdp(
     override fun getChannel(): SelectableChannel = socket.channel
 
     override fun close() {
-        socket.close()
+        try {
+            socket.close()
+        } finally {
+            if (this::inTransform.isInitialized) SipIpSecCleanup.release(inTransform)
+            if (this::outTransform.isInitialized) SipIpSecCleanup.release(outTransform)
+        }
     }
 
     override fun enableIpsec(

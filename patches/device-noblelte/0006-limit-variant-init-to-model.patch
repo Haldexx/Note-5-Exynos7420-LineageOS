@@ -1,0 +1,111 @@
+Subject: [PATCH] init: limit variant detection to the displayed model
+
+The Android 16 init link restored the whole legacy hook, not just the Settings
+model correction. Keep the unified product identity and modem configuration
+that worked before that link: do not replace codenames or fingerprints with
+stock Android 7 values, or inject legacy radio/SIM defaults. Override existing
+model properties only. Unknown bootloaders retain the build defaults.
+
+--- a/init/init_noblelte.cpp
++++ b/init/init_noblelte.cpp
+@@ -31,93 +31,36 @@
+ #include <android-base/logging.h>
+ #include <android-base/properties.h>
+ 
+-#include <android-base/file.h>
+-#include <android-base/logging.h>
+-#include <android-base/strings.h>
+-#include <android-base/properties.h>
+-
+ #include "init_universal7420.h"
+ 
+ using android::base::GetProperty;
+-using android::base::ReadFileToString;
+-using android::base::Trim;
+-
+-void set_sim_info()
+-{
+-	const char *simslot_count_path = "/proc/simslot_count";
+-	std::string simslot_count;
+-
+-	if (ReadFileToString(simslot_count_path, &simslot_count)) {
+-		simslot_count = Trim(simslot_count); // strip newline
+-		property_override("ro.multisim.simslotcount", simslot_count.c_str());
+-	}
+-	else {
+-		LOG(ERROR) << "Could not open '" << simslot_count_path << "'\n";
+-	}
+-}
+ 
+ void vendor_load_properties()
+ {
+-    std::string bootloader = GetProperty("ro.bootloader", "");
++    // This unified product's boot identity, fingerprints and modem defaults
++    // belong to its build configuration. Detect only the hardware model here:
++    // restoring the entire legacy hook changed those working defaults as well.
++    const std::string bootloader = GetProperty("ro.bootloader", "");
+     if (bootloader.find("N920C") == 0) {
+-        property_override("ro.build.description", "nobleltejv-user 7.0 NRD90M N920CXXS5CRH3 release-keys");
+-        set_ro_product_prop("device", "noblelte");
+-        set_ro_build_prop("fingerprint", "samsung/nobleltejv/noblelte:7.0/NRD90M/N920CXXS5CRH3:user/release-keys");
+         set_ro_product_prop("model", "SM-N920C");
+-        set_ro_product_prop("name", "noblelte");
+     } else if (bootloader.find("N920K") == 0) {
+-        property_override("ro.build.description", "nobleltektt-user 7.0 NRD90M N920KKKU2DVG1 release-keys");
+-        set_ro_product_prop("device", "nobleltektt");
+-        set_ro_build_prop("fingerprint", "samsung/nobleltektt/noblelte:7.0/NRD90M/N920KKKU2DVG1:user/release-keys");
+         set_ro_product_prop("model", "SM-N920K");
+-        set_ro_product_prop("name", "nobleltektt");
+     } else if (bootloader.find("N920S") == 0) {
+-        property_override("ro.build.description", "noblelteskt-user 7.0 NRD90M N920SKSU2DVG1 release-keys");
+-        set_ro_product_prop("device", "noblelteskt");
+-        set_ro_build_prop("fingerprint", "samsung/noblelteskt/noblelte:7.0/NRD90M/N920SKSU2DVG1:user/release-keys");
+         set_ro_product_prop("model", "SM-N920S");
+-        set_ro_product_prop("name", "noblelteskt");
+     } else if (bootloader.find("N920L") == 0) {
+-        property_override("ro.build.description", "nobleltelgt-user 7.0 NRD90M N920LKLU2DVG1 release-keys");
+-        set_ro_product_prop("device", "nobleltelgt");
+-        set_ro_build_prop("fingerprint", "samsung/nobleltelgt/noblelte:7.0/NRD90M/N920LKLU2DVG1:user/release-keys");
+         set_ro_product_prop("model", "SM-N920L");
+-        set_ro_product_prop("name", "nobleltelgt");
+     } else if (bootloader.find("N920G") == 0) {
+-        property_override("ro.build.description", "nobleltedd-user 7.0 NRD90M N920GUBU5CVGN release-keys");
+-        set_ro_product_prop("device", "nobleltedd");
+-        set_ro_build_prop("fingerprint", "samsung/nobleltedd/noblelte:7.0/NRD90M/N920GUBU5CVGN:user/release-keys");
+         set_ro_product_prop("model", "SM-N920G");
+-        set_ro_product_prop("name", "nobleltedd");
+     } else if (bootloader.find("N920I") == 0) {
+-        property_override("ro.build.description", "nobleltedv-user 7.0 NRD90M N920IDVU5CVG3 release-keys");
+-        set_ro_product_prop("device", "nobleltedv");
+-        set_ro_build_prop("fingerprint", "samsung/nobleltedv/noblelte:7.0/NRD90M/N920IDVU5CVG3:user/release-keys");
+         set_ro_product_prop("model", "SM-N920I");
+-        set_ro_product_prop("name", "nobleltedv");
+     } else if (bootloader.find("N920W8") == 0) {
+-        property_override("ro.build.description", "nobleltebmc-user 7.0 NRD90M N920W8VLU6CVG1 release-keys");
+-        set_ro_product_prop("device", "nobleltebmc");
+-        set_ro_build_prop("fingerprint", "samsung/nobleltebmc/noblelte:7.0/NRD90M/N920W8VLU6CVG1:user/release-keys");
+         set_ro_product_prop("model", "SM-N920W8");
+-        set_ro_product_prop("name", "nobleltebmc");
+     } else if (bootloader.find("N920T") == 0) {
+-        property_override("ro.build.description", "nobleltetmo-user 7.0 NRD90M  N920TUVU6EVG2 release-keys");
+-        set_ro_product_prop("device", "nobleltetmo");
+-        set_ro_build_prop("fingerprint", "samsung/nobleltetmo/noblelte:7.0/NRD90M/ N920TUVU6EVG2:user/release-keys");
+         set_ro_product_prop("model", "SM-N920T");
+-        set_ro_product_prop("name", "nobleltetmo");
+     } else if (bootloader.find("N920P") == 0) {
+-        property_override("ro.build.description", "nobleltespr-user 7.0 NRD90M N920PVPS3DRH1 release-keys");
+-        set_ro_product_prop("device", "nobleltespr");
+-        set_ro_build_prop("fingerprint", "samsung/nobleltespr/noblelte:7.0/NRD90M/N920PVPS3DRH1:user/release-keys");
+         set_ro_product_prop("model", "SM-N920P");
+-        set_ro_product_prop("name", "nobleltespr");
+     }
+-    gsm_properties("9");
+-    set_sim_info();
+-    
+-    std::string device = GetProperty("ro.product.device", "");
+-    LOG(ERROR) << "Found bootloader id " << bootloader <<  " setting build properties for "
+-        << device <<  " device" << std::endl;
++
++    LOG(INFO) << "Note 5 model detection: " << GetProperty("ro.product.model", "")
++              << "; build identity and modem defaults preserved";
+ }

@@ -1,0 +1,23 @@
+Subject: [PATCH] Put the hardware cache limit in configs_device
+
+The product SimpleDeviceConfig RRO replaces configs_base as a whole. The
+common vendor configs_base item is therefore invisible on the installed
+product, leaving ActivityManager at its 1024-process platform default.
+Keep the existing intended value of 32 in configs_device, which the boot
+receiver applies after configs_base. Leave the compaction setting untouched.
+
+--- a/overlay/packages/apps/SimpleDeviceConfig/res/values/config.xml
++++ b/overlay/packages/apps/SimpleDeviceConfig/res/values/config.xml
+@@ -16,7 +16,11 @@
+         <!-- ART heap compaction for cached apps -->
+         <item>activity_manager/use_compaction=true</item>
+ 
+-        <!-- Allow more cached apps in the background -->
++    </string-array>
++
++    <!-- configs_base belongs to the platform/product overlay. Keep hardware
++         defaults in configs_device so that the product array cannot hide them. -->
++    <string-array name="configs_device">
+         <item>activity_manager/max_cached_processes=32</item>
+     </string-array>
+ </resources>

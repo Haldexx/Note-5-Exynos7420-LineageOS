@@ -5,3 +5,18 @@ service ril-daemon /vendor/bin/hw/rild -l ${vendor.sec.rild.libpath}
     capabilities BLOCK_SUSPEND NET_ADMIN NET_RAW SYS_ADMIN CHOWN SYS_TIME
     socket sap_uim_socket1 stream 660 bluetooth bluetooth
     onrestart restart cpboot-daemon
+
+# Samsung's second RIL client is present only on hardware with two SIM slots.
+service ril-daemon1 /vendor/bin/hw/rild -c 2 -l ${vendor.sec.rild.libpath2}
+    class main
+    disabled
+    user radio
+    group radio cache inet misc audio sdcard_r sdcard_rw log vpn system readproc wakelock
+    capabilities BLOCK_SUSPEND NET_ADMIN NET_RAW SYS_ADMIN CHOWN SYS_TIME
+    onrestart restart cpboot-daemon
+
+on property:init.svc.ril-daemon=running && property:ro.vendor.multisim.simslotcount=2 && property:persist.radio.multisim.config=dsds
+    start ril-daemon1
+
+on property:persist.radio.multisim.config=ss
+    stop ril-daemon1

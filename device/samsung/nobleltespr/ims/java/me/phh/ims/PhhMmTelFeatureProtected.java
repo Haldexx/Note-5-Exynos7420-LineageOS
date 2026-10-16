@@ -7,8 +7,12 @@ import android.telephony.ims.feature.CapabilityChangeRequest;
 import android.telephony.ims.stub.ImsRegistrationImplBase;
 
 public class PhhMmTelFeatureProtected extends MmTelFeature {
-    private int lteCapabilities;
-    private int iwlanCapabilities;
+    // Android changes voice/video/UT settings but does not send an SMS enable request.
+    // SMS is available only when local implementation/carrier support also permits it.
+    private int lteCapabilities = MmTelCapabilities.CAPABILITY_TYPE_SMS;
+    private int iwlanCapabilities = MmTelCapabilities.CAPABILITY_TYPE_SMS;
+    private boolean lteSmsSupported;
+    private boolean iwlanSmsSupported;
     private int activeTech = ImsRegistrationImplBase.REGISTRATION_TECH_LTE;
     private static final int SUPPORTED = MmTelCapabilities.CAPABILITY_TYPE_VOICE
             | MmTelCapabilities.CAPABILITY_TYPE_SMS;
@@ -40,9 +44,19 @@ public class PhhMmTelFeatureProtected extends MmTelFeature {
         publishCapabilities();
     }
 
+    public synchronized void setSmsTransportSupport(boolean lte, boolean iwlan) {
+        lteSmsSupported = lte;
+        iwlanSmsSupported = iwlan;
+        publishCapabilities();
+    }
+
     private void publishCapabilities() {
         int enabled = activeTech == ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN
-                ? iwlanCapabilities : lteCapabilities;
+                ? iwlanCapabilities : activeTech == ImsRegistrationImplBase.REGISTRATION_TECH_LTE
+                ? lteCapabilities : 0;
+        boolean smsSupported = activeTech == ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN
+                ? iwlanSmsSupported : lteSmsSupported;
+        if (!smsSupported) enabled &= ~MmTelCapabilities.CAPABILITY_TYPE_SMS;
         MmTelCapabilities result = new MmTelCapabilities();
         result.addCapabilities(enabled);
         notifyCapabilitiesStatusChanged(result);

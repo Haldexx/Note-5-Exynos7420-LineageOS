@@ -24,4 +24,4 @@ DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE := $(filter-out vendor/lineage/config
 DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE += device/samsung/nobleltespr/framework_compatibility_matrix.xml
 TARGET_RELEASETOOLS_EXTENSIONS := device/samsung/nobleltespr/releasetools
 
-DEVICE_MANIFEST_FILE += device/samsung/nobleltespr/modem/radio-manifest.xml
+DEVICE_MANIFEST_FILE += device/samsung/nobleltedv/modem/radio-manifest.xml

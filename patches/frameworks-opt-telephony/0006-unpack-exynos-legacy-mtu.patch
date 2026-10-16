@@ -1,0 +1,45 @@
+diff --git a/src/java/com/android/internal/telephony/RILUtils.java b/src/java/com/android/internal/telephony/RILUtils.java
+--- a/src/java/com/android/internal/telephony/RILUtils.java
++++ b/src/java/com/android/internal/telephony/RILUtils.java
+@@ -313,6 +313,7 @@
+ import android.net.LinkAddress;
+ import android.net.LinkProperties;
+ import android.os.SystemClock;
++import android.os.SystemProperties;
+ import android.service.carrier.CarrierIdentifier;
+ import android.telephony.AccessNetworkConstants;
+ import android.telephony.Annotation;
+@@ -3187,6 +3188,20 @@
+                 expirationTime);
+     }
+ 
++    /** Decode the Exynos7420 vendor bridge's IPv4 | (IPv6 << 16) legacy HAL field. */
++    @VisibleForTesting
++    static int[] decodeLegacySamsungMtu(int rawMtu, boolean legacyExynos) {
++        int ipv4 = rawMtu & 0xffff;
++        int ipv6 = rawMtu >>> 16;
++        // An ordinary single MTU, an unknown value and other radios retain existing semantics.
++        if (!legacyExynos || rawMtu <= 0 || ipv6 == 0
++                || ipv6 < 1280 || ipv6 > 10000
++                || (ipv4 != 0 && (ipv4 < 68 || ipv4 > 10000))) {
++            return new int[] {rawMtu, rawMtu, rawMtu};
++        }
++        return new int[] {Math.max(ipv4, ipv6), ipv4, ipv6};
++    }
++
+     /**
+      * Convert SetupDataCallResult defined in radio/1.4, 1.5, 1.6/types.hal into
+      * DataCallResponse
+@@ -3227,7 +3242,11 @@
+             dnses = result.dnses.toArray(new String[0]);
+             gateways = result.gateways.toArray(new String[0]);
+             pcscfs = result.pcscf.toArray(new String[0]);
+-            mtu = mtuV4 = mtuV6 = result.mtu;
++            int[] legacyMtu = decodeLegacySamsungMtu(result.mtu,
++                    "samsungexynos7420".equals(SystemProperties.get("ro.hardware")));
++            mtu = legacyMtu[0];
++            mtuV4 = legacyMtu[1];
++            mtuV6 = legacyMtu[2];
+             if (addresses != null) {
+                 for (String address : addresses) {
+                     laList.add(convertToLinkAddress(address));

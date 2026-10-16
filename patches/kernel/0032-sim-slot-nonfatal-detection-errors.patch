@@ -1,0 +1,114 @@
+Subject: [PATCH] sim_slot: return read/probe errors instead of panicking
+
+Userspace auto-detection must be able to fall back to one SIM on unavailable
+GPIOs. Keep the GPIO signed so failed device-tree lookup is not truncated to
+an unsigned value. Release only successfully requested GPIOs.
+
+--- a/drivers/misc/sim_slot.c
++++ b/drivers/misc/sim_slot.c
+@@ -25,65 +25,36 @@
+ /* GPIO STATUS */
+ #define SS_VALUE	0	/* Low  = Single Sim */
+ #define DS_VALUE	1	/* High = Dual Sim */
+-static unsigned int gpio_number = -1;
++static int gpio_number = -EINVAL;
+ 
+ enum { NO_SIM = 0, SINGLE_SIM, DUAL_SIM, TRIPLE_SIM };
+ 
+ static int check_simslot_count(struct seq_file *m, void *v)
+ {
+-	int retval, support_number_of_simslot;
++	int retval, value;
+ 
++	if (!gpio_is_valid(gpio_number))
++		return -ENODEV;
+ 
+-	printk("\n SIM_SLOT_PIN : %d\n", gpio_number);  //temp log for checking GPIO Setting correctly applyed or not
++	retval = gpio_request(gpio_number, "SIM_SLOT_PIN");
++	if (retval)
++		return retval;
+ 
+-	retval = gpio_request(gpio_number,"SIM_SLOT_PIN");
+-	if (retval) {
+-			pr_err("%s:Failed to reqeust GPIO, code = %d.\n",
+-				__func__, retval);
+-			support_number_of_simslot = retval;
+-	}
+-	else
+-	{
+-		retval = gpio_direction_input(gpio_number);
++	retval = gpio_direction_input(gpio_number);
++	if (retval)
++		goto out;
+ 
+-		if (retval){
+-			pr_err("%s:Failed to set direction of GPIO, code = %d.\n",
+-				__func__, retval);
+-			support_number_of_simslot = retval;
+-		}
+-		else
+-		{
+-			retval = gpio_get_value(gpio_number);
+-
+-			/* This codes are implemented assumption that count of GPIO about simslot is only one on H/W schematic
+-                           You may change this codes if count of GPIO about simslot has change */
+-			switch(retval)
+-			{
+-				case SS_VALUE:
+-					support_number_of_simslot = SINGLE_SIM;
+-					break;
+-				case DS_VALUE:
+-					support_number_of_simslot = DUAL_SIM;
+-					break;
+-				default :
+-					support_number_of_simslot = -1;
+-					break;
+-			}
+-		}
+-		gpio_free(gpio_number);
++	value = gpio_get_value(gpio_number);
++	if (value != SS_VALUE && value != DS_VALUE) {
++		retval = -EIO;
++		goto out;
+ 	}
+ 
+-	if(support_number_of_simslot < 0)
+-	{
+-		pr_err("******* Make a forced kernel panic because can't check simslot count******\n");
+-		panic("kernel panic");
+-	}
+-
+-	printk("%s: Number of simslot: %u\n", __func__, support_number_of_simslot);
+-	seq_printf(m, "%u\n", support_number_of_simslot);
+-
+-	return 0;
+-
++	seq_printf(m, "%u\n", value == DS_VALUE ? DUAL_SIM : SINGLE_SIM);
++	retval = 0;
++out:
++	gpio_free(gpio_number);
++	return retval;
+ }
+ 
+ static int check_simslot_count_open(struct inode *inode, struct file *file)
+@@ -103,15 +74,15 @@
+ 	struct device *dev = &pdev->dev;
+ 
+ 	gpio_number = of_get_gpio(dev->of_node, 0);
+-	if (gpio_number < 0) {
++	if (gpio_number < 0)
++		return gpio_number; /* Includes -EPROBE_DEFER while the GPIO controller starts. */
++	if (!gpio_is_valid(gpio_number)) {
+ 		dev_err(dev, "failed to get proper gpio number\n");
+ 		return -EINVAL;
+ 	}
+ 
+-	if (!proc_create("simslot_count",0,NULL,&check_simslot_count_fops))
+-	{
+-		pr_err("***** Make a forced kernel panic because can't make a simslot_count file node ******\n");
+-		panic("kernel panic");
++	if (!proc_create("simslot_count", 0, NULL, &check_simslot_count_fops)) {
++		dev_err(dev, "failed to create simslot_count node\n");
+ 		return -ENOMEM;
+ 	}
+ 

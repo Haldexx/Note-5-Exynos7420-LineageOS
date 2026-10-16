@@ -1,0 +1,133 @@
+diff --git a/src/java/com/android/internal/telephony/data/DataProfileManager.java b/src/java/com/android/internal/telephony/data/DataProfileManager.java
+--- a/src/java/com/android/internal/telephony/data/DataProfileManager.java
++++ b/src/java/com/android/internal/telephony/data/DataProfileManager.java
+@@ -732,6 +732,34 @@
+             return null;
+         }
+ 
++        // A carrier's Wi-Fi-only MMS APN can differ from its preferred internet APN.
++        // Do not authenticate the unrestricted cellular APN at the ePDG when a valid
++        // transport-specific MMS profile is provisioned for this subscription.
++        if (networkType == TelephonyManager.NETWORK_TYPE_IWLAN && !isNtn
++                && !isEsimBootStrapProvisioning
++                && networkRequest.hasCapability(NetworkCapabilities.NET_CAPABILITY_MMS)) {
++            ApnSetting iwlanMmsApn = mAllDataProfiles.stream()
++                    .filter(networkRequest::canBeSatisfiedBy)
++                    .filter(dp -> dp.getApnSetting() != null)
++                    .filter(dp -> dp.getApnSetting().getNetworkTypeBitmask()
++                            == TelephonyManager.NETWORK_TYPE_BITMASK_IWLAN)
++                    .filter(dp -> dp.getApnSetting().isForInfrastructure(
++                            ApnSetting.INFRASTRUCTURE_CELLULAR))
++                    .filter(dp -> !dp.getApnSetting().isEsimBootstrapProvisioning())
++                    .filter(dp -> dp.getApnSetting().getApnSetId()
++                            == Telephony.Carriers.MATCH_ALL_APN_SET_ID
++                            || dp.getApnSetting().getApnSetId() == mPreferredDataProfileSetId)
++                    .filter(dp -> ignorePermanentFailure
++                            || !dp.getApnSetting().getPermanentFailed())
++                    .min(Comparator.comparing(DataProfile::getLastSetupTimestamp))
++                    .map(DataProfile::getApnSetting)
++                    .orElse(null);
++            if (iwlanMmsApn != null) {
++                log("Selected carrier Wi-Fi MMS profile " + iwlanMmsApn.getApnName());
++                return iwlanMmsApn;
++            }
++        }
++
+         // if esim bootstrap provisioning in progress, do not apply preferred data profile
+         if (!isEsimBootStrapProvisioning) {
+                 // If the preferred data profile can be used, always use it if it can satisfy the
+diff --git a/tests/telephonytests/src/com/android/internal/telephony/data/DataProfileManagerTest.java b/tests/telephonytests/src/com/android/internal/telephony/data/DataProfileManagerTest.java
+--- a/tests/telephonytests/src/com/android/internal/telephony/data/DataProfileManagerTest.java
++++ b/tests/telephonytests/src/com/android/internal/telephony/data/DataProfileManagerTest.java
+@@ -883,6 +883,91 @@
+         super.tearDown();
+     }
+ 
++
++    @Test
++    public void testIwlanMmsPrefersDedicatedProfileWithoutChangingCellularOrIms() throws Exception {
++        List<DataProfile> profiles = getAllDataProfiles();
++        DataProfile general = profiles.stream().filter(dp -> dp.getApnSetting().getApnName()
++                .equals(GENERAL_PURPOSE_APN)).findFirst().orElseThrow();
++        // The preferred internet APN also advertises MMS,
++        // with no RAT restriction. It must not shadow the carrier's IWLAN-only APN.
++        DataProfile unrestricted = new DataProfile.Builder()
++                .setApnSetting(new ApnSetting.Builder()
++                        .setId(general.getApnSetting().getId())
++                        .setEntryName(GENERAL_PURPOSE_APN).setApnName(GENERAL_PURPOSE_APN)
++                        .setOperatorNumeric(PLMN).setCarrierEnabled(true)
++                        .setApnTypeBitmask(ApnSetting.TYPE_DEFAULT | ApnSetting.TYPE_MMS
++                                | ApnSetting.TYPE_SUPL)
++                        .setApnSetId(DEFAULT_APN_SET_ID)
++                        .setInfrastructureBitmask(ApnSetting.INFRASTRUCTURE_CELLULAR)
++                        .setNetworkTypeBitmask(0).build())
++                .setTrafficDescriptor(general.getTrafficDescriptor()).build();
++        profiles.remove(general);
++        profiles.add(unrestricted);
++        replaceInstance(DataProfileManager.class, "mPreferredDataProfile",
++                mDataProfileManagerUT, unrestricted);
++        DataProfile wifiMms = new DataProfile.Builder()
++                .setApnSetting(new ApnSetting.Builder()
++                        .setOperatorNumeric(PLMN).setCarrierEnabled(true)
++                        .setApnSetId(DEFAULT_APN_SET_ID)
++                        .setInfrastructureBitmask(ApnSetting.INFRASTRUCTURE_CELLULAR)
++                        .setId(100).setEntryName("Wi-Fi MMS").setApnName("wifi.mms.carrier.example")
++                        .setApnTypeBitmask(ApnSetting.TYPE_MMS)
++                        .setNetworkTypeBitmask((int) TelephonyManager.NETWORK_TYPE_BITMASK_IWLAN)
++                        .build())
++                .setTrafficDescriptor(new TrafficDescriptor("wifi.mms.carrier.example", null)).build();
++        profiles.add(wifiMms);
++        TelephonyNetworkRequest mms = new TelephonyNetworkRequest(new NetworkRequest.Builder()
++                .addCapability(NetworkCapabilities.NET_CAPABILITY_MMS).build(), mPhone,
++                mFeatureFlags);
++        assertThat(mDataProfileManagerUT.getDataProfileForNetworkRequest(mms,
++                TelephonyManager.NETWORK_TYPE_IWLAN, false, false, false)).isSameInstanceAs(wifiMms);
++        assertThat(mDataProfileManagerUT.getDataProfileForNetworkRequest(mms,
++                TelephonyManager.NETWORK_TYPE_LTE, false, false, false))
++                .isSameInstanceAs(unrestricted);
++        TelephonyNetworkRequest ims = new TelephonyNetworkRequest(new NetworkRequest.Builder()
++                .addCapability(NetworkCapabilities.NET_CAPABILITY_IMS).build(), mPhone,
++                mFeatureFlags);
++        assertThat(mDataProfileManagerUT.getDataProfileForNetworkRequest(ims,
++                TelephonyManager.NETWORK_TYPE_LTE, false, false, false)
++                .getApnSetting().getApnName()).isEqualTo(IMS_APN);
++
++        // Carriers without a dedicated Wi-Fi MMS profile keep existing selection.
++        profiles.remove(wifiMms);
++        assertThat(mDataProfileManagerUT.getDataProfileForNetworkRequest(mms,
++                TelephonyManager.NETWORK_TYPE_IWLAN, false, false, false))
++                .isSameInstanceAs(unrestricted);
++        profiles.add(wifiMms);
++        TelephonyNetworkRequest internet = new TelephonyNetworkRequest(
++                new NetworkRequest.Builder()
++                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build(),
++                mPhone, mFeatureFlags);
++        assertThat(mDataProfileManagerUT.getDataProfileForNetworkRequest(internet,
++                TelephonyManager.NETWORK_TYPE_IWLAN, false, false, false))
++                .isSameInstanceAs(unrestricted);
++
++        // Request capability matching, APN sets, and failure state still apply.
++        TelephonyNetworkRequest mixed = new TelephonyNetworkRequest(new NetworkRequest.Builder()
++                .addCapability(NetworkCapabilities.NET_CAPABILITY_MMS)
++                .addCapability(NetworkCapabilities.NET_CAPABILITY_SUPL).build(), mPhone,
++                mFeatureFlags);
++        assertThat(mDataProfileManagerUT.getDataProfileForNetworkRequest(mixed,
++                TelephonyManager.NETWORK_TYPE_IWLAN, false, false, false))
++                .isSameInstanceAs(unrestricted);
++        wifiMms.getApnSetting().setPermanentFailed(true);
++        assertThat(mDataProfileManagerUT.getDataProfileForNetworkRequest(mms,
++                TelephonyManager.NETWORK_TYPE_IWLAN, false, false, false))
++                .isSameInstanceAs(unrestricted);
++        assertThat(mDataProfileManagerUT.getDataProfileForNetworkRequest(mms,
++                TelephonyManager.NETWORK_TYPE_IWLAN, false, false, true)).isSameInstanceAs(wifiMms);
++        wifiMms.getApnSetting().setPermanentFailed(false);
++        replaceInstance(DataProfileManager.class, "mPreferredDataProfileSetId",
++                mDataProfileManagerUT, APN_SET_ID_1);
++        assertThat(mDataProfileManagerUT.getDataProfileForNetworkRequest(mms,
++                TelephonyManager.NETWORK_TYPE_IWLAN, false, false, false))
++                .isSameInstanceAs(unrestricted);
++    }
++
+     @Test
+     public void testGetDataProfileForNetworkRequest() {
+         NetworkRequest request = new NetworkRequest.Builder()

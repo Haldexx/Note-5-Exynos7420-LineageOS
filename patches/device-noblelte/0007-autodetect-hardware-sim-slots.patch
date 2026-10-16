@@ -1,0 +1,67 @@
+Subject: [PATCH] init: detect hardware SIM count for unified Shannon builds
+
+Opt in through the product; retain single-SIM on unknown/missing/invalid data.
+Do not restore stock fingerprints, codenames, or legacy radio network defaults.
+Requires the nonfatal sim_slot driver read-error fix on this legacy kernel.
+
+--- a/init/init_noblelte.cpp
++++ b/init/init_noblelte.cpp
+@@ -28,12 +28,38 @@
+    IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include <android-base/file.h>
++#include <android-base/strings.h>
+ #include <android-base/logging.h>
+ #include <android-base/properties.h>
+ 
+ #include "init_universal7420.h"
+ 
+ using android::base::GetProperty;
++
++// Enabled only by the unified Shannon product; the Sprint modem path stays separate.
++static void configure_sim_slots()
++{
++    if (GetProperty("ro.vendor.note5.sim_autodetect", "false") != "true") return;
++
++    std::string raw;
++    std::string count = "1";
++    if (android::base::ReadFileToString("/proc/simslot_count", &raw)) {
++        raw = android::base::Trim(raw);
++        if (raw == "1" || raw == "2") count = raw;
++        else LOG(WARNING) << "Invalid hardware SIM-slot count; keeping single-SIM";
++    } else {
++        LOG(WARNING) << "SIM-slot detector unavailable; keeping single-SIM";
++    }
++
++    property_override("ro.vendor.multisim.simslotcount", count.c_str());
++    property_override("ro.multisim.simslotcount", count.c_str());
++    // Compatibility aliases requested by users; Samsung's RIL uses simslotcount.
++    property_override("ro.vendor.multisim.simslot.count", count.c_str());
++    property_override("ro.multisim.simslot.count", count.c_str());
++    property_override("persist.radio.multisim.config", count == "2" ? "dsds" : "ss");
++    LOG(INFO) << "Note 5 hardware SIM slots: " << count;
++}
+ 
+ void vendor_load_properties()
+ {
+@@ -57,10 +83,18 @@
+         set_ro_product_prop("model", "SM-N920W8");
+     } else if (bootloader.find("N920T") == 0) {
+         set_ro_product_prop("model", "SM-N920T");
++    } else if (bootloader.find("N9208") == 0) {
++        set_ro_product_prop("model", "SM-N9208");
++    } else if (bootloader.find("N9200") == 0) {
++        set_ro_product_prop("model", "SM-N9200");
++    } else if (bootloader.find("N920F") == 0) {
++        set_ro_product_prop("model", "SM-N920F");
+     } else if (bootloader.find("N920P") == 0) {
+         set_ro_product_prop("model", "SM-N920P");
+     }
+ 
++    configure_sim_slots();
++
+     LOG(INFO) << "Note 5 model detection: " << GetProperty("ro.product.model", "")
+-              << "; build identity and modem defaults preserved";
++              << "; build identity preserved";
+ }

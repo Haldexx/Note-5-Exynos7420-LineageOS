@@ -38,17 +38,19 @@ class PhhImsBroadcastReceiver : BroadcastReceiver() {
                 return
             }
             imsService.armPeriodicRegisterAlarm()
-            CoroutineScope(Dispatchers.IO).launch {
-                val sipHandler = imsService.mmTelFeature?.getSipHandlerOrNull()
-                try {
-                    sipHandler?.register()
-                } catch (e: IOException) {
-                    Rlog.w(TAG, "Periodic REGISTER failed (stale socket), reconnecting", e)
+            for (feature in imsService.featuresSnapshot()) {
+                CoroutineScope(Dispatchers.IO).launch {
+                    val sipHandler = feature.getSipHandlerOrNull()
                     try {
-                        sipHandler?.connect()
-                    } catch (e2: Throwable) {
-                        Rlog.e(TAG, "Reconnect after failed REGISTER also failed", e2)
-                        sipHandler?.imsFailureCallback?.invoke()
+                        sipHandler?.register()
+                    } catch (e: IOException) {
+                        Rlog.w(TAG, "Periodic REGISTER failed (stale socket), reconnecting", e)
+                        try {
+                            sipHandler?.connect()
+                        } catch (e2: Throwable) {
+                            Rlog.e(TAG, "Reconnect after failed REGISTER also failed", e2)
+                            sipHandler?.imsFailureCallback?.invoke()
+                        }
                     }
                 }
             }

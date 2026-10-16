@@ -23,7 +23,7 @@ class PhhImsSms(
         pdu: ByteArray,
     ) {
         try {
-            Rlog.d(TAG, "$slotId sendSms $token, $messageRef, $format, $smsc")
+            Rlog.d(TAG, "$slotId sendSms token=$token ref=$messageRef format=$format")
             if (format != "3gpp") {
                 onSendSmsResultError(
                     token,
@@ -63,6 +63,15 @@ class PhhImsSms(
             )
         } catch (t: Throwable) {
             android.util.Log.e(TAG, "Failed sending sms", t)
+            // A synchronous local failure must complete the framework tracker.
+            // Do not automatically resend: delivery may be uncertain after a write error.
+            onSendSmsResultError(
+                token,
+                messageRef,
+                ImsSmsImplBase.SEND_STATUS_ERROR,
+                SmsManager.RESULT_ERROR_GENERIC_FAILURE,
+                RESULT_NO_NETWORK_ERROR,
+            )
         }
     }
 
@@ -74,7 +83,7 @@ class PhhImsSms(
         Rlog.d(TAG, "$slotId acknowledgeSms $token, $messageRef, $result")
 
         val error = result != ImsSmsImplBase.DELIVER_STATUS_OK
-        sipHandler.sendSmsAck(token, messageRef, error)
+        if (::sipHandler.isInitialized) sipHandler.sendSmsAck(token, messageRef, error)
     }
 
     override fun acknowledgeSmsReport(
@@ -83,6 +92,8 @@ class PhhImsSms(
         result: Int,
     ) {
         Rlog.d(TAG, "$slotId acknowledgeSmsReport $token, $messageRef, $result")
+        if (::sipHandler.isInitialized) sipHandler.sendSmsAck(token, messageRef,
+            result != ImsSmsImplBase.STATUS_REPORT_STATUS_OK)
     }
 
     override fun onReady() {

@@ -35,11 +35,12 @@ import kotlin.concurrent.withLock
 private data class smsHeaders(
     val dest: String,
     val callId: String,
-    val cseq: String,
+    val ref: Byte,
 )
 
 class SipHandler(
     val ctxt: Context,
+    val slotId: Int,
 ) {
     companion object {
         private const val TAG = "PHH SipHandler"
@@ -103,23 +104,20 @@ class SipHandler(
         mediaPorts.clear()
     }
 
-    val myHandler = Handler(HandlerThread("PhhMmTelFeature").apply { start() }.looper)
+    private val handlerThread = lazy { HandlerThread("PhhIms-$slotId").apply { start() } }
+    val myHandler: Handler by lazy { Handler(handlerThread.value.looper) }
     val myExecutor = Executor { p0 -> myHandler.post(p0) }
 
-    private val subscriptionManager: SubscriptionManager
-    private val telephonyManager: TelephonyManager
-    private val connectivityManager: ConnectivityManager
-    private val ipSecManager: IpSecManager
-
-    init {
-        subscriptionManager = ctxt.getSystemService(SubscriptionManager::class.java)
-        telephonyManager = ctxt.getSystemService(TelephonyManager::class.java)
-        connectivityManager = ctxt.getSystemService(ConnectivityManager::class.java)
-        ipSecManager = ctxt.getSystemService(IpSecManager::class.java)
-    }
-
+    private val subscriptionManager = ctxt.getSystemService(SubscriptionManager::class.java)
     @SuppressLint("MissingPermission")
-    private val activeSubscription = subscriptionManager.activeSubscriptionInfoList!![0]
+    private val activeSubscription = requireNotNull(
+        subscriptionManager.getActiveSubscriptionInfoForSimSlotIndex(slotId),
+    ) { "No active subscription for requested IMS slot" }
+    private val subId = activeSubscription.subscriptionId
+    private val telephonyManager = ctxt.getSystemService(TelephonyManager::class.java)
+        .createForSubscriptionId(subId)
+    private val connectivityManager = ctxt.getSystemService(ConnectivityManager::class.java)
+    private val ipSecManager = ctxt.getSystemService(IpSecManager::class.java)
 
     private val deviceImei =
         (
@@ -150,7 +148,6 @@ class SipHandler(
                 " (meid present=${meid != null} meidMatches=${meid == imei})",
         )
     }
-    private val subId = activeSubscription.subscriptionId
     private val mcc = telephonyManager.simOperator.substring(0 until 3)
     private var mnc =
         telephonyManager.simOperator.substring(3).let { if (it.length == 2) "0$it" else it }
@@ -210,7 +207,9 @@ class SipHandler(
 
     lateinit var ipsecSettings: SipIpsecSettings
 
-    private lateinit var network: Network
+    @Volatile private lateinit var network: Network
+    private val bearerState = SipBearerState<Network>()
+    private var signallingAttempt: SipBearerAttempt? = null
 
     private lateinit var plainSocket: SipConnection
     private lateinit var socket: SipConnection
@@ -223,7 +222,7 @@ class SipHandler(
     private val signallingClients = java.util.concurrent.CopyOnWriteArrayList<Socket>()
     private var requestCallbacks: Map<SipMethod, ((SipRequest) -> Int)> = mapOf()
     private var responseCallbacks: Map<String, ((SipResponse) -> Boolean)> = mapOf()
-    private var imsReady = false
+    @Volatile private var imsReady = false
     var imsReadyCallback: (() -> Unit)? = null
     var imsRegisteringCallback: (() -> Unit)? = null
     @Volatile var registrationTech = ImsRegistrationImplBase.REGISTRATION_TECH_LTE
@@ -241,6 +240,7 @@ class SipHandler(
     var onCancelledCall: ((handle: Object, from: String, extras: Map<String, String>) -> Unit)? =
         null
     private val smsLock = ReentrantLock()
+    private val smsSubmits = SmsSubmitTracker()
     private var smsToken = 0
     private val smsHeadersMap = mutableMapOf<Int, smsHeaders>()
 
@@ -344,12 +344,17 @@ class SipHandler(
         return true
     }
 
-    var abandonnedBecauseOfNoPcscf = false
+    @Volatile var abandonnedBecauseOfNoPcscf = false
 
-    private suspend fun reconnectWithRetry() {
+    private suspend fun reconnectWithRetry(
+        expectedBearer: SipBearerState.Snapshot<Network>? = bearerState.snapshot(),
+    ) {
+        if (expectedBearer == null) return
         var backoffMs = 2_000L
         var generation = registrationGeneration.get()
         for (attempt in 1..RECONNECT_ATTEMPTS) {
+            if (!bearerState.isCurrent(expectedBearer)) return
+            if (imsReady) return // Another worker already registered this bearer.
             try {
                 if (!connectUnlessSuperseded(generation, "reconnect attempt $attempt")) return
                 generation = registrationGeneration.get()
@@ -366,14 +371,35 @@ class SipHandler(
             backoffMs = (backoffMs * 2).coerceAtMost(RECONNECT_MAX_BACKOFF_MS)
         }
         Rlog.e(TAG, "Giving up reconnecting after $RECONNECT_ATTEMPTS attempts")
-        imsFailureCallback?.invoke()
+        bearerState.ifCurrent(expectedBearer) { imsFailureCallback?.invoke() }
     }
 
     private val registrationGeneration = AtomicInteger(0)
+    private val disposed = AtomicBoolean(false)
+    private val networkCallbackLock = Any()
+    private var imsNetworkCallback: ConnectivityManager.NetworkCallback? = null
+
+    fun close() {
+        if (!disposed.compareAndSet(false, true)) return
+        bearerState.close()
+        registrationGeneration.incrementAndGet()
+        imsReady = false
+        synchronized(networkCallbackLock) {
+            imsNetworkCallback?.let { runCatching { connectivityManager.unregisterNetworkCallback(it) } }
+            imsNetworkCallback = null
+        }
+        callStopped.set(true)
+        callGeneration.incrementAndGet()
+        closeSignalling()
+        closeMediaSockets()
+        imsFailureCallback?.invoke()
+        if (handlerThread.isInitialized()) handlerThread.value.quitSafely()
+    }
+
 
     @Synchronized
     fun connectUnlessSuperseded(generationAtTrigger: Int, why: String): Boolean {
-        if (registrationGeneration.get() != generationAtTrigger && !abandonnedBecauseOfNoPcscf) {
+        if (registrationGeneration.get() != generationAtTrigger || imsReady) {
             Rlog.d(TAG, "$why: the stack reconnected since; not connecting again")
             return false
         }
@@ -382,18 +408,11 @@ class SipHandler(
     }
 
     private fun closeSignalling() {
+        smsSubmits.snapshot().forEach { finishSmsSubmit(it, false) }
         signallingClients.forEach { runCatching { it.close() } }
         signallingClients.clear()
-        if (this::plainSocket.isInitialized) runCatching { plainSocket.close() }
-        if (this::socket.isInitialized) runCatching { socket.close() }
-        if (this::serverSocket.isInitialized) runCatching { serverSocket.close() }
-        if (this::serverSocketUdp.isInitialized) runCatching { serverSocketUdp.socket.close() }
-        if (this::ipsecSettings.isInitialized) {
-            runCatching { ipsecSettings.clientSpiC.close() }
-            runCatching { ipsecSettings.clientSpiS.close() }
-            runCatching { ipsecSettings.serverSpiC?.close() }
-            runCatching { ipsecSettings.serverSpiS?.close() }
-        }
+        signallingAttempt?.close()
+        signallingAttempt = null
     }
 
     private fun serveIncomingTcpClient(client: Socket, generation: Int) {
@@ -426,12 +445,13 @@ class SipHandler(
 
     @Synchronized
     fun connect() {
+        val bearer = bearerState.snapshot() ?: throw IOException("No active IMS bearer")
         registrationGeneration.incrementAndGet()
         closeSignalling()
         imsReady = false
         refreshRegistrationTech()
         imsRegisteringCallback?.invoke()
-        val lp = connectivityManager.getLinkProperties(network)
+        val lp = connectivityManager.getLinkProperties(bearer.network)
         val count = if (lp == null) 1 else
             (lp.javaClass.getMethod("getPcscfServers").invoke(lp) as List<*>).size.coerceAtLeast(1)
         val override = android.os.SystemProperties.getInt("debug.phh.ims.pcscf", -1)
@@ -442,22 +462,27 @@ class SipHandler(
                 commonHeaders = emptyMap()
                 registerHeaders = "From: <sip:$user>\nTo: <sip:$user>".toSipHeadersMap() + generateCallId()
                 akaDigest = """Digest username="$user",realm="$realm",nonce="",uri="sip:$realm",response="",algorithm=AKAv1-MD5"""
-                connectAttempt(index)
+                if (!bearerState.isCurrent(bearer)) throw IOException("IMS bearer changed between proxies")
+                connectAttempt(index, bearer)
                 return
             } catch (e: IOException) {
                 Rlog.w(TAG, "IMS proxy index=$index transport/registration failed; trying next candidate", e)
                 lastFailure = e
                 closeSignalling()
+                if (!bearerState.isCurrent(bearer)) throw e
             } catch (e: Throwable) {
                 closeSignalling()
                 throw e
             }
         }
-        imsFailureCallback?.invoke()
+        bearerState.ifCurrent(bearer) { imsFailureCallback?.invoke() }
         throw lastFailure ?: IOException("No IMS proxy could be contacted")
     }
 
-    private fun connectAttempt(proxyIndex: Int) {
+    private fun connectAttempt(proxyIndex: Int, bearer: SipBearerState.Snapshot<Network>) {
+        val network = bearer.network // Every socket/proxy in this attempt uses one bearer.
+        val attempt = bearerState.begin(bearer)
+        signallingAttempt = attempt
         abandonnedBecauseOfNoPcscf = false
         Rlog.d(TAG, "Trying to connect to SIP server")
         val lp = connectivityManager.getLinkProperties(network)
@@ -487,41 +512,37 @@ class SipHandler(
                 }
             }
 
-        localAddr =
-            lp.linkAddresses
-                .map { it.address }
-                .sortedBy { if (it is Inet6Address) 0 else 1 }
-                .first()
+        localAddr = sipLocalAddress(lp.linkAddresses.map { it.address }, pcscf)
         pcscfAddr = pcscf
 
         Rlog.w(TAG, "Connecting with address $localAddr to $pcscfAddr")
 
-        val clientSpiC = ipSecManager.allocateSecurityParameterIndex(localAddr)
-        val clientSpiS = ipSecManager.allocateSecurityParameterIndex(localAddr, clientSpiC.spi + 1)
+        val clientSpiC = attempt.keep(ipSecManager.allocateSecurityParameterIndex(localAddr)) { SipIpSecCleanup.release(it) }
+        val clientSpiS = attempt.keep(ipSecManager.allocateSecurityParameterIndex(localAddr, clientSpiC.spi + 1)) { SipIpSecCleanup.release(it) }
         ipsecSettings =
             SipIpsecSettings(
                 clientSpiS = clientSpiS,
                 clientSpiC = clientSpiC,
             )
 
-        plainSocket =
+        plainSocket = attempt.keep(
             if (isControlSocketUdp) {
                 SipConnectionUdp(network, pcscfAddr, localAddr)
             } else {
                 SipConnectionTcp(network, pcscfAddr, localAddr)
-            }
+            }) { it.close() }
         if (plainSocket is SipConnectionTcp) (plainSocket as SipConnectionTcp).socket.soTimeout = 15000
         plainSocket.connect(5060)
-        socket =
+        socket = attempt.keep(
             if (plainSocket is SipConnectionTcp) {
                 SipConnectionTcp(network, pcscfAddr, plainSocket.gLocalAddr())
             } else {
                 SipConnectionUdp(network, pcscfAddr, plainSocket.gLocalAddr())
-            }
+            }) { it.close() }
         serverSocket =
-            SipConnectionTcpServer(network, pcscfAddr, plainSocket.gLocalAddr(), socket.gLocalPort() + 1)
+            attempt.keep(SipConnectionTcpServer(network, pcscfAddr, plainSocket.gLocalAddr(), socket.gLocalPort() + 1)) { it.close() }
         serverSocketUdp =
-            SipConnectionUdpServer(network, pcscfAddr, plainSocket.gLocalAddr(), socket.gLocalPort() + 1)
+            attempt.keep(SipConnectionUdpServer(network, pcscfAddr, plainSocket.gLocalAddr(), socket.gLocalPort() + 1)) { it.socket.close() }
 
         Rlog.d(
             TAG,
@@ -552,6 +573,7 @@ class SipHandler(
         val nonceB64 = wwwAuthenticateParams["nonce"]!!
         val challengeRealm = wwwAuthenticateParams["realm"] ?: realm
 
+        attempt.checkOpen()
         Rlog.d(TAG, "Requesting AKA challenge")
         val akaResult = sipAkaChallenge(telephonyManager, nonceB64)
         akaDigest =
@@ -594,10 +616,10 @@ class SipHandler(
 
             portS = securityServerParams["port-s"]!!.toInt()
             val spiS = securityServerParams["spi-s"]!!.toUInt().toInt()
-            val serverSpiS = ipSecManager.allocateSecurityParameterIndex(pcscfAddr, spiS)
+            val serverSpiS = attempt.keep(ipSecManager.allocateSecurityParameterIndex(pcscfAddr, spiS)) { SipIpSecCleanup.release(it) }
 
             val spiC = securityServerParams["spi-c"]!!.toUInt().toInt()
-            val serverSpiC = ipSecManager.allocateSecurityParameterIndex(pcscfAddr, spiC)
+            val serverSpiC = attempt.keep(ipSecManager.allocateSecurityParameterIndex(pcscfAddr, spiC)) { SipIpSecCleanup.release(it) }
 
             ipsecSettings =
                 SipIpsecSettings(
@@ -624,13 +646,21 @@ class SipHandler(
                         }
                     }
 
-            val serverInTransform = ipSecBuilder.buildTransportModeTransform(pcscfAddr, clientSpiS)
-            val serverOutTransform = ipSecBuilder.buildTransportModeTransform(localAddr, serverSpiC)
-            socket.enableIpsec(ipSecBuilder, ipSecManager, clientSpiC, serverSpiS)
+            val serverInTransform = attempt.keep(ipSecBuilder.buildTransportModeTransform(pcscfAddr, clientSpiS)) { SipIpSecCleanup.release(it) }
+            val serverOutTransform = attempt.keep(ipSecBuilder.buildTransportModeTransform(localAddr, serverSpiC)) { SipIpSecCleanup.release(it) }
+            try {
+                socket.enableIpsec(ipSecBuilder, ipSecManager, clientSpiC, serverSpiS)
+                // Cancellation can race transform creation inside enableIpsec.
+                attempt.keep(socket) { it.close() }
+            } catch (e: Throwable) {
+                runCatching { socket.close() }
+                throw e
+            }
             serverSocket.enableIpsec(ipSecManager, serverInTransform, serverOutTransform)
             serverSocketUdp.enableIpsec(ipSecManager, serverInTransform, serverOutTransform)
         }
         if (socket is SipConnectionTcp) (socket as SipConnectionTcp).socket.soTimeout = 15000
+        attempt.checkOpen()
         socket.connect(portS)
         updateCommonHeaders(socket)
         register()
@@ -657,7 +687,15 @@ class SipHandler(
         }
 
         if (socket is SipConnectionTcp) (socket as SipConnectionTcp).socket.soTimeout = 0
-        setResponseCallback(registerHeaders["call-id"]!![0], ::registerCallback)
+        val successfulGeneration = registrationGeneration.get()
+        setResponseCallback(registerHeaders["call-id"]!![0]) { reply ->
+            if (registrationGeneration.get() != successfulGeneration) true
+            else if (!bearerState.ifCurrent(bearer) { registerCallback(reply) }) true
+            else {
+                subscribeRegistrationEvent()
+                false
+            }
+        }
         setRequestCallback(SipMethod.MESSAGE, ::handleSms)
         setRequestCallback(SipMethod.INVITE, ::handleCall)
         setRequestCallback(SipMethod.PRACK, ::handlePrack)
@@ -665,7 +703,11 @@ class SipHandler(
         setRequestCallback(SipMethod.CANCEL, ::handleCancel)
         setRequestCallback(SipMethod.BYE, ::handleCancel)
         setRequestCallback(SipMethod.UPDATE, ::handleUpdate)
-        handleResponse(regReply)
+        attempt.checkOpen()
+        if (!bearerState.ifCurrent(bearer) { registerCallback(regReply) }) {
+            throw IOException("IMS bearer changed before publishing registration")
+        }
+        subscribeRegistrationEvent()
 
         val establishedSocket = socket
         val establishedServerSocket = serverSocket
@@ -673,19 +715,24 @@ class SipHandler(
         val establishedGeneration = registrationGeneration.get()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                while (parseMessage(establishedSocket.gReader(), establishedSocket.gWriter())) { }
+                while (bearerState.isCurrent(bearer) && registrationGeneration.get() == establishedGeneration &&
+                    parseMessage(establishedSocket.gReader(), establishedSocket.gWriter())) { }
                 Rlog.w(TAG, "Main socket got EOF, reconnecting")
             } catch (t: Throwable) {
                 Rlog.w(TAG, "Got exception in main/control socket, reconnecting", t)
             }
             establishedSocket.close()
             if (socket !== establishedSocket || registrationGeneration.get() != establishedGeneration) return@launch
-            reconnectWithRetry()
+            bearerState.ifCurrent(bearer) {
+                imsReady = false
+                imsFailureCallback?.invoke()
+            }
+            reconnectWithRetry(bearer)
         }
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 while (true) {
-                    val client = establishedServerSocket.serverSocket.accept()
+                    val client = attempt.keep(establishedServerSocket.serverSocket.accept()) { it.close() }
                     signallingClients.add(client)
                     CoroutineScope(Dispatchers.IO).launch {
                         serveIncomingTcpClient(client, establishedGeneration)
@@ -716,94 +763,110 @@ class SipHandler(
     }
 
     fun getVolteNetwork() {
-        Rlog.d(TAG, "Requesting IMS network")
-        connectivityManager.requestNetwork(
-            NetworkRequest
-                .Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-                .setNetworkSpecifier(TelephonyNetworkSpecifier.Builder().setSubscriptionId(subId).build())
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_IMS)
-                .build(),
-            object : ConnectivityManager.NetworkCallback() {
-                override fun onUnavailable() {
-                    Rlog.d(TAG, "IMS network unavailable")
-                }
+        Rlog.d(TAG, "Requesting IMS network for slot $slotId")
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onUnavailable() {
+                Rlog.d(TAG, "IMS network unavailable")
+            }
 
-                override fun onLost(network: Network) {
-                    Rlog.d(TAG, "IMS network lost")
-                    if (this@SipHandler::network.isInitialized && this@SipHandler.network == network) {
-                        imsReady = false
-                        abandonnedBecauseOfNoPcscf = true
-                        imsFailureCallback?.invoke()
-                    }
+            override fun onLost(network: Network) {
+                Rlog.d(TAG, "IMS network lost")
+                if (bearerState.lost(network)) {
+                    registrationGeneration.incrementAndGet()
+                    imsReady = false
+                    abandonnedBecauseOfNoPcscf = true
+                    imsFailureCallback?.invoke()
                 }
+            }
 
-                override fun onBlockedStatusChanged(
-                    network: Network,
-                    blocked: Boolean,
-                ) {
-                    Rlog.d(TAG, "IMS network blocked status changed $blocked")
-                }
+            override fun onBlockedStatusChanged(
+                network: Network,
+                blocked: Boolean,
+            ) {
+                Rlog.d(TAG, "IMS network blocked status changed $blocked")
+            }
 
-                override fun onCapabilitiesChanged(
-                    network: Network,
-                    networkCapabilities: NetworkCapabilities,
-                ) {
-                    Rlog.d(TAG, "IMS network capabilities changed $networkCapabilities")
-                }
+            override fun onCapabilitiesChanged(
+                network: Network,
+                networkCapabilities: NetworkCapabilities,
+            ) {
+                Rlog.d(TAG, "IMS network capabilities changed $networkCapabilities")
+            }
 
-                override fun onLosing(
-                    network: Network,
-                    maxMsToLive: Int,
-                ) {
-                    Rlog.d(TAG, "IMS network losing")
-                }
+            override fun onLosing(
+                network: Network,
+                maxMsToLive: Int,
+            ) {
+                Rlog.d(TAG, "IMS network losing")
+            }
 
-                override fun onLinkPropertiesChanged(
-                    _network: Network,
-                    linkProperties: LinkProperties,
-                ) {
-                    Rlog.d(TAG, "IMS network link properties changed $linkProperties")
-                    if (this@SipHandler::network.isInitialized && network == _network) {
-                        refreshRegistrationTech()
-                    }
-                    val pcscfs = linkProperties!!.javaClass.getMethod("getPcscfServers").invoke(linkProperties) as List<*>
-                    Rlog.d(TAG, "Got pcscfs $pcscfs")
-                    if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
-                        network = _network
-                        val generation = registrationGeneration.get()
+            override fun onLinkPropertiesChanged(
+                _network: Network,
+                linkProperties: LinkProperties,
+            ) {
+                Rlog.d(TAG, "IMS network link properties changed $linkProperties")
+                val bearer = bearerState.snapshot()?.takeIf { it.network == _network } ?: return
+                refreshRegistrationTech()
+                val pcscfs = linkProperties.javaClass.getMethod("getPcscfServers").invoke(linkProperties) as List<*>
+                Rlog.d(TAG, "IMS bearer P-CSCF count=${pcscfs.size}")
+                if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
+                    val generation = registrationGeneration.get()
+                    // Never run a 15-second TCP connect on ConnectivityManager's callback thread.
+                    CoroutineScope(Dispatchers.IO).launch {
+                        if (!bearerState.isCurrent(bearer)) return@launch
                         try {
                             connectUnlessSuperseded(generation, "onLinkPropertiesChanged")
                         } catch (e: Throwable) {
                             Rlog.e(TAG, "connect() from onLinkPropertiesChanged failed: $e")
-                            CoroutineScope(Dispatchers.IO).launch { reconnectWithRetry() }
+                            reconnectWithRetry(bearer)
                         }
                     }
                 }
+            }
 
-                override fun onAvailable(_network: Network) {
-                    Rlog.d(TAG, "Got IMS network.")
-                    if (!this@SipHandler::network.isInitialized || network != _network || abandonnedBecauseOfNoPcscf) {
-                        registrationGeneration.incrementAndGet()
-                        imsReady = false
-                        network = _network
-                        val generation = registrationGeneration.get()
-                        thread {
-                            Thread.sleep(4000)
-                            if (network != _network) return@thread
-                            try {
-                                connectUnlessSuperseded(generation, "onAvailable")
-                            } catch (e: Throwable) {
-                                Rlog.e(TAG, "connect() failed: $e")
-                                CoroutineScope(Dispatchers.IO).launch { reconnectWithRetry() }
-                            }
+            override fun onAvailable(_network: Network) {
+                if (disposed.get()) return
+                Rlog.d(TAG, "Got IMS network for slot $slotId.")
+                if (bearerState.available(_network)) {
+                    registrationGeneration.incrementAndGet()
+                    imsReady = false
+                    network = _network
+                    val generation = registrationGeneration.get()
+                    val bearer = bearerState.snapshot() ?: return
+                    thread {
+                        Thread.sleep(4000)
+                        if (!bearerState.isCurrent(bearer)) return@thread
+                        try {
+                            connectUnlessSuperseded(generation, "onAvailable")
+                        } catch (e: Throwable) {
+                            Rlog.e(TAG, "connect() failed: $e")
+                            CoroutineScope(Dispatchers.IO).launch { reconnectWithRetry(bearer) }
                         }
-                    } else {
-                        Rlog.d(TAG, "... don't try anything")
                     }
+                } else {
+                    Rlog.d(TAG, "... don't try anything")
                 }
-            },
-        )
+            }
+
+        }
+        synchronized(networkCallbackLock) {
+            if (disposed.get() || imsNetworkCallback != null) return
+            imsNetworkCallback = callback
+            try {
+                connectivityManager.requestNetwork(
+                    NetworkRequest
+                        .Builder()
+                        .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                        .setNetworkSpecifier(TelephonyNetworkSpecifier.Builder().setSubscriptionId(subId).build())
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_IMS)
+                        .build(),
+                    callback,
+                )
+            } catch (error: Throwable) {
+                imsNetworkCallback = null
+                throw error
+            }
+        }
     }
 
     fun updateCommonHeaders(socket: SipConnection) {
@@ -861,13 +924,14 @@ class SipHandler(
     private fun requireRegistrationTransport() {
         // The periodic alarm can run while connectAttempt is still creating these.
         // Use the existing IOException recovery path instead of a fatal lateinit access.
-        if (!this::socket.isInitialized || !this::serverSocket.isInitialized ||
+        if (disposed.get() || !this::socket.isInitialized || !this::serverSocket.isInitialized ||
             !this::ipsecSettings.isInitialized) {
             throw IOException("IMS registration transport is not initialized")
         }
     }
 
     @SuppressLint("MissingPermission")
+    @Synchronized
     fun register(_writer: OutputStream? = null) {
         requireRegistrationTransport()
         val tm = ctxt.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
@@ -970,8 +1034,21 @@ class SipHandler(
                 "to" to listOf("<$mySip>"),
             )
 
-        subscribe()
+        // REGISTER 200 establishes registration; reg-event SUBSCRIBE is independent.
+        if (!imsReady) {
+            imsReady = true
+            Rlog.i(TAG, "IMS registration accepted: tech=$registrationTech")
+            imsReadyCallback?.invoke()
+        }
         return false
+    }
+
+    private fun subscribeRegistrationEvent() {
+        try {
+            subscribe()
+        } catch (e: IOException) {
+            Rlog.w(TAG, "Registration-event SUBSCRIBE could not be sent", e)
+        }
     }
 
     private fun dialogContact(
@@ -1006,17 +1083,16 @@ class SipHandler(
                     Accept: application/reginfo+xml
                     """.toSipHeadersMap(),
             )
-        if (!imsReady) {
-            setResponseCallback(msg.headers["call-id"]!![0], ::subscribeCallback)
-        }
+        setResponseCallback(msg.headers["call-id"]!![0], ::subscribeCallback)
         Rlog.d(TAG, "Sending $msg")
         synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
     }
 
     fun subscribeCallback(response: SipResponse): Boolean {
-        imsReadyCallback?.invoke()
-        imsReady = true
-        return true
+        if (response.statusCode >= 300) {
+            Rlog.w(TAG, "Registration-event subscription rejected: ${response.statusCode}; IMS remains registered")
+        }
+        return response.statusCode >= 200
     }
 
     fun waitPrack(v: Int, generation: Int = callGeneration.get()): Boolean {
@@ -2332,191 +2408,143 @@ a=sendrecv
         return 100
     }
 
-    fun handleSms(request: SipRequest): Int {
-        val sms = request.body.SipSmsDecode()
-        if (sms == null) {
-            Rlog.w(TAG, "Could not decode sms pdu")
-            return 500
+    private fun finishSmsSubmit(submission: SmsSubmitTracker.Submission, success: Boolean) {
+        if (!smsSubmits.finish(submission)) return
+        cbLock.withLock { responseCallbacks -= submission.callId }
+        Rlog.d(TAG, "SMS submit completed rpRef=${submission.ref} success=$success")
+        try {
+            if (success) submission.success() else submission.failure()
+        } catch (t: Throwable) {
+            Rlog.w(TAG, "Framework SMS completion callback failed", t)
         }
-        Rlog.d(TAG, "Decoded SMS type ${sms.type}, ${sms.pdu?.toString()}")
+    }
+
+    fun handleSms(request: SipRequest): Int {
+        val sms = request.body.SipSmsDecode() ?: return 400
         when (sms.type) {
             SmsType.RP_DATA_FROM_NETWORK -> {
-                val receivedCb = onSmsReceived
-                if (receivedCb == null) {
-                    Rlog.d(TAG, "No onSmsReceived callback!")
+                val pdu = sms.pdu ?: return 400
+                val tpduOffset = 1 + (pdu[0].toInt() and 255)
+                val statusReport = (pdu[tpduOffset].toInt() and 3) == 2
+                val receivedCb = if (statusReport) onSmsStatusReportReceived else onSmsReceived
+                if (receivedCb == null) return 500
+                val dest = request.headers["from"]?.firstOrNull()?.getParams()?.component1()
+                    ?.trimStart('<')?.trimEnd('>') ?: return 400
+                val callId = request.headers["call-id"]?.firstOrNull() ?: return 400
+                val token = smsLock.withLock {
+                    val token = smsToken++
+                    smsHeadersMap[token] = smsHeaders(dest, callId, sms.ref)
+                    token
+                }
+                try {
+                    receivedCb(token, "3gpp", pdu)
+                } catch (t: Throwable) {
+                    smsLock.withLock { smsHeadersMap.remove(token) }
+                    Rlog.w(TAG, "Framework rejected incoming SMS PDU", t)
                     return 500
                 }
-
-                val token = smsLock.withLock { smsToken++ }
-                val dest =
-                    request.headers["from"]!![0]
-                        .getParams()
-                        .component1()
-                        .trimStart('<')
-                        .trimEnd('>')
-                val callId = request.headers["call-id"]!![0]
-                val cseq = request.headers["cseq"]!![0]
-                smsHeadersMap[token] = smsHeaders(dest, callId, cseq)
-                try {
-                    receivedCb(token, "3gpp", sms.pdu!!)
-                } catch (t: Throwable) {
-                    Rlog.d(TAG, "Failed sending SMS to framework", t)
+            }
+            SmsType.RP_ACK_FROM_NETWORK, SmsType.RP_ERROR_FROM_NETWORK -> {
+                val ref = sms.ref.toInt() and 255
+                val replyTo = request.headers["in-reply-to"]?.firstOrNull()
+                val submission = smsSubmits.find(ref, replyTo)
+                if (submission == null) {
+                    // Duplicate/late reports must not complete a different SMS.
+                    return if (replyTo == null) 200 else 488
                 }
+                if (sms.type == SmsType.RP_ERROR_FROM_NETWORK)
+                    Rlog.w(TAG, "SMS relay rejected rpRef=$ref cause=${sms.cause}")
+                finishSmsSubmit(submission, sms.type == SmsType.RP_ACK_FROM_NETWORK)
             }
-
-            SmsType.RP_ACK_FROM_NETWORK -> {
-                try {
-                    onSmsStatusReportReceived?.invoke(sms.ref.toInt(), "3gpp", ByteArray(2))
-                } catch (t: Throwable) {
-                    Rlog.d(TAG, "Failed sending SMS ACK to framework", t)
-                }
-            }
-
-            SmsType.RP_ERROR_FROM_NETWORK -> {
-                Rlog.d(TAG, "SMS error from network")
-            }
-
-            else -> {
-                return 500
-            }
+            else -> return 400
         }
         return 200
     }
 
     fun sendSms(
-        smsSmsc: String?,
-        pdu: ByteArray,
-        ref: Int,
-        successCb: (() -> Unit),
-        failCb: (() -> Unit),
+        smsSmsc: String?, pdu: ByteArray, ref: Int,
+        successCb: (() -> Unit), failCb: (() -> Unit),
     ) {
-        val decodableSmsc =
-            try {
-                PhoneNumberUtils.numberToCalledPartyBCD(smsSmsc, PhoneNumberUtils.BCD_EXTENDED_TYPE_CALLED_PARTY)
-                true
-            } catch (t: Throwable) {
-                false
-            }
-
+        if (!imsReady) { failCb(); return }
+        val generation = registrationGeneration.get()
         val smsManager = SmsManager.getSmsManagerForSubscriptionId(subId)
-        val smscIdentity =
-            try {
-                val i =
-                    smsManager
-                        .javaClass
-                        .getMethod("getSmscIdentity")
-                        .invoke(smsManager) as Uri
-                if (i.host == null) null else i
-            } catch (t: Throwable) {
-                null
-            }
-        Rlog.d(TAG, "Got smscIdentity $smscIdentity")
-        val smsc =
-            if (smsSmsc != null && decodableSmsc) {
-                smsSmsc
-            } else if (forceSmsc != null) {
-                forceSmsc
+        val smscIdentity = runCatching {
+            smsManager.javaClass.getMethod("getSmscIdentity").invoke(smsManager) as? Uri
+        }.getOrNull()?.toString()?.takeIf { it.isNotBlank() }
+        val identityNumber = smscIdentity?.substringAfter(':')?.substringBefore('@')
+            ?.substringBefore(';')?.let { normalizeSmscAddress(it) }
+        val smsc = decodeImsSmsc(smsSmsc) ?: forceSmsc?.let { normalizeSmscAddress("+$it") } ?:
+            runCatching { normalizeSmscAddress(smsManager.smscAddress) }.getOrNull() ?:
+            identityNumber ?: error("No SMS service-centre address")
+        val destination = sipSmsServiceUri(smscIdentity, smsc, realm)
+        // Validate encoding before reserving any transaction state.
+        SipSmsEncodeSms(0, smsc, pdu)
+        val callId = generateCallId()["call-id"]!![0]
+        val submission = smsSubmits.start(callId, successCb, failCb)
+        val msg = SipRequest(SipMethod.MESSAGE, destination,
+            commonHeaders + mapOf("call-id" to listOf(callId)) + """
+                From: <$mySip>
+                To: <$destination>
+                P-Preferred-Identity: <$mySip>
+                Content-Type: application/vnd.3gpp.sms
+                Supported: sec-agree, path
+                Require: sec-agree
+                Proxy-Require: sec-agree
+                Allow: MESSAGE
+                Accept-Contact: *;+g.3gpp.smsip;require;explicit
+                Request-Disposition: no-fork
+            """.toSipHeadersMap(), SipSmsEncodeSms(submission.ref.toByte(), smsc, pdu))
+        setResponseCallback(callId) { response ->
+            if (response.headers["cseq"]?.firstOrNull() != msg.headers["cseq"]?.firstOrNull()) {
+                false
+            } else if (response.statusCode < 200) {
+                false // 100 Trying is provisional, not an SMS failure.
             } else {
-                try {
-                    Rlog.d(
-                        TAG,
-                        "Got smsc $smscIdentity // host is ${smscIdentity?.host} // ${smscIdentity?.scheme} // ${smscIdentity?.path}",
-                    )
-                    smscIdentity!!.host!!
-                } catch (t: Throwable) {
-                    try {
-                        Rlog.d(TAG, "getSmscIdentity failed", t)
-                        val smscStr = smsManager.smscAddress
-                        val smscMatchRegex = Regex("([0-9]+)")
-                        Rlog.d(TAG, "Got smsc $smscStr, match ${smscMatchRegex.find(smscStr!!)}")
-                        val match = smscMatchRegex.find(smscStr!!)!!
-                        match.groupValues[1]
-                    } catch (t: Throwable) {
-                        Rlog.d(TAG, "smscAddress failed", t)
-                        null
-                    }
-                }
-            }
-
-        val data = SipSmsEncodeSms(ref.toByte(), if (smsc == null) "" else "+$smsc", pdu)
-        Rlog.d(TAG, "sending sms ${data.toHex()} to smsc $smsc")
-        val dest =
-            if (smscIdentity != null) {
-                "sip:$smscIdentity"
-            } else {
-                "sip:+$smsc@$realm"
-            }
-
-        val msg =
-            SipRequest(
-                SipMethod.MESSAGE,
-                "sip:${smscIdentity ?: realm}",
-                commonHeaders +
-                    """
-                    From: <$mySip>
-                    To: <$dest>
-                    P-Preferred-Identity: <$mySip>
-                    P-Asserted-Identity: <$mySip>
-                    Expires: 600000
-                    Content-Type: application/vnd.3gpp.sms
-                    Supported: sec-agree, path
-                    Require: sec-agree
-                    Proxy-Require: sec-agree
-                    Allow: MESSAGE
-                    Accept-Contact: *;+g.3gpp.smsip;require;explicit
-                    Request-Disposition: no-fork
-                    """.toSipHeadersMap(),
-                data,
-            )
-        setResponseCallback(
-            msg.headers["call-id"]!![0],
-            { resp: SipResponse ->
-                if (resp.statusCode == 200 || resp.statusCode == 202) {
-                    successCb()
-                } else {
-                    failCb()
-                }
+                // SIP acceptance is not the SMSC submit result. Wait for RP-ACK/RP-ERROR.
+                if (response.statusCode !in 200..299) finishSmsSubmit(submission, false)
                 true
-            },
-        )
-        Rlog.d(TAG, "Sending $msg")
-        synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
+            }
+        }
+        // Greater than SIP timer F (64*T1 = 32s). No automatic resend on uncertainty.
+        myHandler.postDelayed({ finishSmsSubmit(submission, false) }, 60_000L)
+        try {
+            if (!imsReady || registrationGeneration.get() != generation)
+                throw IOException("IMS registration changed before SMS submit")
+            Rlog.d(TAG, "Sending SMS tpRef=$ref rpRef=${submission.ref} tech=$registrationTech")
+            val writer = socket.gWriter()
+            synchronized(writer) { writer.write(msg.toByteArray()) }
+        } catch (t: Throwable) {
+            Rlog.w(TAG, "SMS transport write failed", t)
+            finishSmsSubmit(submission, false)
+        }
     }
 
-    fun sendSmsAck(
-        token: Int,
-        ref: Int,
-        error: Boolean,
-    ) {
-        Rlog.d(TAG, "sending sms ack")
-        val body = SipSmsEncodeAck(ref.toByte())
-        val headers = smsHeadersMap.remove(token)
-        if (headers == null) {
-            return
+    fun sendSmsAck(token: Int, ref: Int, error: Boolean) {
+        val headers = smsLock.withLock { smsHeadersMap.remove(token) } ?: return
+        // Android returns TP-MR here; acknowledge the saved network RP reference.
+        val body = if (error) SipSmsEncodeError(headers.ref) else SipSmsEncodeAck(headers.ref)
+        val msg = SipRequest(SipMethod.MESSAGE, headers.dest,
+            commonHeaders + """
+                From: <$mySip>
+                To: <${headers.dest}>
+                In-Reply-To: ${headers.callId}
+                Content-Type: application/vnd.3gpp.sms
+                Proxy-Require: sec-agree
+                Require: sec-agree
+                Allow: MESSAGE
+                Supported: path, sec-agree
+                Request-Disposition: no-fork
+                Accept-Contact: *;+g.3gpp.smsip
+            """.toSipHeadersMap(), body)
+        val callId = msg.headers["call-id"]!![0]
+        setResponseCallback(callId) { it.statusCode >= 200 }
+        myHandler.postDelayed({ cbLock.withLock { responseCallbacks -= callId } }, 32_000L)
+        try {
+            val writer = socket.gWriter()
+            synchronized(writer) { writer.write(msg.toByteArray()) }
+        } catch (t: Throwable) {
+            cbLock.withLock { responseCallbacks -= callId }
+            Rlog.w(TAG, "SMS receive acknowledgement write failed", t)
         }
-        if (error) {
-            return
-        }
-        val msg =
-            SipRequest(
-                SipMethod.MESSAGE,
-                headers.dest,
-                commonHeaders +
-                    """
-                    Cseq: ${headers.cseq}
-                    In-Reply-To: ${headers.callId}
-                    Content-Type: application/vnd.3gpp.sms
-                    Proxy-Require: sec-agree
-                    Require: sec-agree
-                    Allow: MESSAGE
-                    Supported: path, gruu, sec-agree
-                    Request-Disposition: no-fork
-                    Accept-Contact: *;+g.3gpp.smsip
-                    """.toSipHeadersMap(),
-                body,
-            )
-        setResponseCallback(msg.headers["call-id"]!![0], { true })
-        Rlog.d(TAG, "Sending $msg")
-        synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
     }
 }

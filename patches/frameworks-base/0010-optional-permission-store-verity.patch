@@ -1,0 +1,33 @@
+diff --git a/services/permission/java/com/android/server/permission/access/util/AtomicFileExtensions.kt b/services/permission/java/com/android/server/permission/access/util/AtomicFileExtensions.kt
+--- a/services/permission/java/com/android/server/permission/access/util/AtomicFileExtensions.kt
++++ b/services/permission/java/com/android/server/permission/access/util/AtomicFileExtensions.kt
+@@ -19,7 +19,8 @@
+ import android.os.FileUtils
+ import android.util.AtomicFile
+ import android.util.Slog
+-import com.android.server.security.FileIntegrity;
++import com.android.internal.security.VerityUtils
++import com.android.server.security.FileIntegrity
+ import java.io.File
+ import java.io.FileInputStream
+ import java.io.FileNotFoundException
+@@ -61,11 +62,14 @@
+     } catch (e: Exception) {
+         Slog.e("AccessPersistence", "Failed to write $reserveFile", e)
+     }
+-    try {
+-        FileIntegrity.setUpFsVerity(baseFile)
+-        FileIntegrity.setUpFsVerity(reserveFile)
+-    } catch (e: Exception) {
+-        Slog.e("AccessPersistence", "Failed to verity-protect runtime-permissions", e)
++    // Integrity is optional here; the synced main and reserve writes are still required.
++    if (VerityUtils.isFsVeritySupported()) {
++        try {
++            FileIntegrity.setUpFsVerity(baseFile)
++            FileIntegrity.setUpFsVerity(reserveFile)
++        } catch (e: Exception) {
++            Slog.e("AccessPersistence", "Failed to verity-protect runtime-permissions", e)
++        }
+     }
+ }
+ 

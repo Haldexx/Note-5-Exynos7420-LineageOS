@@ -13,14 +13,6 @@ kernel_dir=kernel/samsung/universal7420
 [[ $(git -C "$kernel_dir" rev-parse HEAD) == 0e373ce6c5eb5f3aa6aea888af9bffa97313113a ]] || {
   echo 'Kernel revision differs from the validated patch baseline.' >&2; exit 1;
 }
-for patch in "$repo_dir"/patches/kernel/*.patch; do
-  if git -C "$kernel_dir" apply --reverse --check "$patch" 2>/dev/null; then
-    echo "Already applied: $(basename "$patch")"
-  else
-    git -C "$kernel_dir" apply --check "$patch"
-    git -C "$kernel_dir" apply "$patch"
-  fi
-done
 series_tree() {
   local dir=$1 count=$2 index tree patch
   shift 2
@@ -67,9 +59,12 @@ apply_series() {
   echo "Files in $dir differ from the pinned revision plus its patches." >&2
   return 1
 }
+apply_series "$kernel_dir" "$repo_dir"/patches/kernel/*.patch
 for entry in 'system/core:system-core:0e96ff13d90df568ddd788bb02b3ddb6e3641528' \
+             'packages/services/Mms:mms-service:9e14dd19d767cd58e3d71c29eefe581be010f053' \
              'packages/services/Iwlan:iwlan:42b97ec9ec3f8a0f5ad4190607ad56fd749e66b7' \
              'packages/modules/Connectivity:connectivity:c9f3e7795256bd4a3f99d02e604e24fd1552c2b3' \
+             'packages/modules/Wifi:wifi:8e08d5bf50bb82fa66aab3d1e9e224dd2489955f' \
              'system/netd:netd:796eaca5ab9dfdd87751c51bb71fa3f26c87d034' \
              'packages/services/Telephony:telephony:7ec78c63c51a9651cfb59c7ef04cf91036eb76c1' \
              'packages/apps/Launcher3:launcher3:ee25ab865b59ecda9c8fd6f901e80b48d7b789ea' \
